@@ -39,4 +39,6 @@ const (
 
 func getElectionSleepDuration() time.Duration {
 	return time.Duration(200) * time.Millisecond
+	// r := rand.New(rand.NewSource(666))
+	// time.Duration(r.Intn(1)) * time.Microsecond * 100
 }

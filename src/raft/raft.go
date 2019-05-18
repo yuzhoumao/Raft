@@ -19,7 +19,6 @@ package raft
 
 import (
 	"labrpc"
-	"math/rand"
 	"sync"
 	"time"
 )
@@ -80,6 +79,7 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
+	applyCh   chan ApplyMsg       // each time a new entry is committed to log, send ApplyMsg to applyCh
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -94,7 +94,6 @@ type Raft struct {
 	majorityNeed          int
 	appendEntriesRPCchan  chan AppendEntriesRPC
 	electionTimerResetted bool
-	currentElection       int
 
 	// Leader specific data
 	nextIndex  []int // initialize to just after the last one in leader's log when elected
@@ -277,75 +276,45 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applyCh = applyCh
 
-	// Your initialization code here (2A, 2B, 2C).
+	// create log
 	entry := LogEntry{nil, 0}
 	rf.log = make([]*LogEntry, 0)
 	rf.log = append(rf.log, &entry)
+
+	// initialize Raft as follower and timeout resetted to allow one timeout period
+	// so that raft servers don't timeout together and split votes on start up
 	rf.currentState = follower
+	rf.timeoutResetted = true
+	// store min majority count for ease of use
 	rf.majorityNeed = len(peers)/2 + 1
-	rf.appendEntriesRPCchan = make(chan AppendEntriesRPC)
-	rf.currentLeader = -1
-	rf.timeoutResetted = false
+
+	// TODO: add other variable inits
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	// start main routine
 	go rf.Main(me)
-
+	// end of Raft server instantiation
 	return rf
 }
 
 // Main
 func (rf *Raft) Main(me int) {
-	r := rand.New(rand.NewSource(666))
+	go rf.electionTimeoutRoutine()
+	go rf.respondAppendEntriesRoutine()
 	for {
-		if rf.currentLeader == me {
-			// leader business
-		} else {
-			// follower business
-			for rf.currentLeader == -1 || rf.timeoutResetted {
-				rf.timeoutResetted = false
-				time.Sleep(time.Duration(r.Intn(1)) * time.Microsecond * 100) // ??? TBD
+		if rf.commitIndex > rf.lastApplied {
+			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				rf.applyCh <- ApplyMsg{true, rf.log[i].Command, i}
 			}
-			// time out, kick off election
-			rf.currentState = candidate
-			rf.currentTerm++
-			args := RequestVoteArgs{}
-			args.CandidateId = rf.me
-			args.LastLogIndex = 0
-			args.LastLogTerm = 0
-			args.Term = rf.currentTerm
-			voteCount := 0
-			for i, v := range rf.peers {
-				if i != rf.me {
-					reply := RequestVoteReply{}
-					v.Call("Raft.RequestVote", &args, &reply) // this should be a go routine rather than a potentially blocking function call
-					if reply.VoteGranted {
-						voteCount++
-					}
-				}
-			}
-			for {
-				if voteCount >= rf.majorityNeed {
-					break
-				}
-				if rf.currentState != candidate {
-					break
-				}
-			}
-			if voteCount >= rf.majorityNeed {
-				rf.currentState = leader
-				rf.currentLeader = rf.me
-				// immediate heart beat
-			} else {
-
-			}
+			rf.lastApplied = rf.commitIndex
 		}
 	}
 }
 
-func (rf *Raft) respondAppendEntriesRPC() {
+func (rf *Raft) respondAppendEntriesRoutine() {
 	for {
 		rpc := <-rf.appendEntriesRPCchan
 		if rpc.args.Term < rf.currentTerm { // the server sending this RPC thinks it is the leader,
@@ -361,6 +330,8 @@ func (rf *Raft) respondAppendEntriesRPC() {
 			rf.currentTerm = rpc.args.Term
 			rpc.reply.Term = rpc.args.Term
 			rf.currentState = follower
+			// All Servers: if RPC response contain term > currentTerm
+			// convert to follower
 		}
 		if rpc.args.PrevLogIndex > len(rf.log)-1 { // len(rf.log) - 1 is the last index in log
 			rpc.reply.Success = false
@@ -426,14 +397,12 @@ func (rf *Raft) electionTimeoutRoutine() {
 			if rf.currentState == follower {
 				// convert to candidate
 				rf.currentState = candidate
-				rf.currentElection = 0
 			}
 			// if election Timeout elapse, start a new election
 			if rf.currentState == candidate {
 				rf.electionTimerResetted = true
 				rf.currentTerm++
-				rf.currentElection++
-				go rf.kickOffElection(rf.currentElection)
+				go rf.kickOffElection()
 			}
 		}
 	}
@@ -441,14 +410,14 @@ func (rf *Raft) electionTimeoutRoutine() {
 
 // kickOffElection should constantly check currentElection and return once < currentElection
 // it should also check currentState and return once follower
-func (rf *Raft) kickOffElection(electionCounter int) {
+func (rf *Raft) kickOffElection() {
 	// send out requestVote RPCs
 	replyChan := make(chan *RequestVoteReplyWrapper)
 	args := RequestVoteArgs{}
-	args.CandidateId = rf.me
-	args.LastLogIndex = 0
-	args.LastLogTerm = 0
 	args.Term = rf.currentTerm
+	args.CandidateId = rf.me
+	args.LastLogIndex = len(rf.log) - 1
+	args.LastLogTerm = rf.log[args.LastLogIndex].TermReceived
 	currentVoteCounter := 1
 	for i, _ := range rf.peers {
 		reply := RequestVoteReply{}
@@ -458,7 +427,7 @@ func (rf *Raft) kickOffElection(electionCounter int) {
 			// should the RequestVote RPC be sent again?
 		}
 	}
-	for {
+	for { // request vote response handler
 		replyWrapper := <-replyChan
 		if rf.currentTerm > args.Term {
 			// already timed out and kick started a new election
