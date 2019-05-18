@@ -84,15 +84,17 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	currentTerm          int
-	votedFor             int
-	log                  []*LogEntry
-	commitIndex          int
-	lastApplied          int
-	currentLeader        int
-	isCandidate          bool
-	majorityNeed         int
-	appendEntriesRPCchan chan AppendEntriesRPC
+	currentTerm           int
+	votedFor              int
+	log                   []*LogEntry
+	commitIndex           int
+	lastApplied           int
+	currentLeader         int
+	currentState          RaftServerState
+	majorityNeed          int
+	appendEntriesRPCchan  chan AppendEntriesRPC
+	electionTimerResetted bool
+	currentElection       int
 
 	// Leader specific data
 	nextIndex  []int // initialize to just after the last one in leader's log when elected
@@ -274,6 +276,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	entry := LogEntry{nil, 0}
 	rf.log = make([]*LogEntry, 0)
 	rf.log = append(rf.log, &entry)
+	rf.currentState = follower
 	rf.majorityNeed = len(peers)/2 + 1
 	rf.appendEntriesRPCchan = make(chan AppendEntriesRPC)
 	rf.currentLeader = -1
@@ -300,7 +303,7 @@ func (rf *Raft) Main(me int) {
 				time.Sleep(time.Duration(r.Intn(1)) * time.Microsecond * 100) // ??? TBD
 			}
 			// time out, kick off election
-			rf.isCandidate = true
+			rf.currentState = candidate
 			rf.currentTerm++
 			args := RequestVoteArgs{}
 			args.CandidateId = rf.me
@@ -321,12 +324,12 @@ func (rf *Raft) Main(me int) {
 				if voteCount >= rf.majorityNeed {
 					break
 				}
-				if !rf.isCandidate {
+				if rf.currentState != candidate {
 					break
 				}
 			}
 			if voteCount >= rf.majorityNeed {
-				rf.isCandidate = false
+				rf.currentState = leader
 				rf.currentLeader = rf.me
 				// immediate heart beat
 			} else {
@@ -402,6 +405,38 @@ func binarySearchFindFirst(log []*LogEntry, end int, targetTerm int) int {
 }
 
 func (rf *Raft) sendAppendEntriesRPC() {
-	// only start if leader
+	// only start if in leader state, should stop if converts to follower
 	// should be accompanied by a timer for every server
+}
+
+func (rf *Raft) electionTimeoutRoutine() {
+	for {
+		if rf.electionTimerResetted || rf.currentState == leader {
+			rf.electionTimerResetted = false
+			time.Sleep(getElectionSleepDuration())
+		} else {
+			// timed out
+			if rf.currentState == follower {
+				// convert to candidate
+				rf.currentState = candidate
+				rf.currentTerm++
+				rf.currentElection = 0
+			}
+			if rf.currentState == candidate {
+				rf.electionTimerResetted = true
+				rf.currentElection++
+				go rf.kickOffElection(rf.currentElection)
+			}
+		}
+	}
+}
+
+// kickOffElection should constantly check currentElection and return once < currentElection
+func (rf *Raft) kickOffElection(electionCounter int) {
+	// on conversion to candidate, start election
+	// currentTerm++
+	// vote for self
+	// reset the election timer
+	// send out requestVote RPCs
+	// if election Timeout elapse, start a new election
 }

@@ -1,6 +1,9 @@
 package raft
 
-import "log"
+import (
+	"log"
+	"time"
+)
 
 // Debugging
 const Debug = 0
@@ -24,4 +27,16 @@ func max(a, b int) int {
 		return b
 	}
 	return a
+}
+
+type RaftServerState int
+
+const (
+	follower RaftServerState = iota
+	candidate
+	leader
+)
+
+func getElectionSleepDuration() time.Duration {
+	return time.Duration(200) * time.Millisecond
 }
