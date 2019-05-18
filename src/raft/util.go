@@ -42,3 +42,8 @@ func getElectionSleepDuration() time.Duration {
 	// r := rand.New(rand.NewSource(666))
 	// time.Duration(r.Intn(1)) * time.Microsecond * 100
 }
+
+func getHeartbeatSleepDuration() time.Duration {
+	return time.Duration(200) * time.Millisecond
+	// this should be just a constant period
+}

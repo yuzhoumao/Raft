@@ -66,9 +66,8 @@ type AppendEntriesReply struct {
 }
 
 type AppendEntriesRPC struct {
-	args     *AppendEntriesArgs
-	reply    *AppendEntriesReply
-	finished bool
+	args  *AppendEntriesArgs
+	reply *AppendEntriesReply
 }
 
 //
@@ -84,16 +83,18 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	currentTerm           int
-	votedFor              int
-	log                   []*LogEntry
-	commitIndex           int
-	lastApplied           int
-	currentLeader         int
-	currentState          RaftServerState
-	majorityNeed          int
-	appendEntriesRPCchan  chan AppendEntriesRPC
-	electionTimerResetted bool
+	currentTerm                    int
+	votedFor                       int // used in voting decision
+	log                            []*LogEntry
+	commitIndex                    int
+	lastApplied                    int
+	currentLeader                  int
+	currentState                   RaftServerState
+	majorityNeed                   int
+	rawAppendEntriesRPCRequest     chan AppendEntriesRPC
+	handledAppendEntriesRPCRequest chan AppendEntriesRPC
+	rawAppendEntriesRPCResponse    chan AppendEntriesRPC
+	electionTimerResetted          bool
 
 	// Leader specific data
 	nextIndex  []int // initialize to just after the last one in leader's log when elected
@@ -218,9 +219,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, replyChan chan<- *RequestVoteReplyWrapper) {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, replyChan chan<- *RequestVoteReply) {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	replyChan <- &RequestVoteReplyWrapper{reply, ok}
+	for !ok {
+		// resend?
+		return
+	}
+	replyChan <- reply
 	return
 }
 
@@ -316,14 +321,13 @@ func (rf *Raft) Main(me int) {
 
 func (rf *Raft) respondAppendEntriesRoutine() {
 	for {
-		rpc := <-rf.appendEntriesRPCchan
+		rpc := <-rf.rawAppendEntriesRPCRequest
 		if rpc.args.Term < rf.currentTerm { // the server sending this RPC thinks it is the leader,
 			// while it is actually not
 			// this may occur when a broken internet connection suddenly comes live
 			rpc.reply.Term = rf.currentTerm // the fake leader shall convert to follower after receiving
 			rpc.reply.Success = false
-			rpc.finished = true
-			rf.appendEntriesRPCchan <- rpc
+			rf.handledAppendEntriesRPCRequest <- rpc
 			continue
 		}
 		if rpc.args.Term >= rf.currentTerm {
@@ -337,8 +341,7 @@ func (rf *Raft) respondAppendEntriesRoutine() {
 			rpc.reply.Success = false
 			rpc.reply.ConflictTerm = 0 // force leader to check len(rf.log) - 1 in next RPC
 			rpc.reply.StartOfConflictTerm = len(rf.log)
-			rpc.finished = true
-			rf.appendEntriesRPCchan <- rpc
+			rf.handledAppendEntriesRPCRequest <- rpc
 			continue
 		}
 		if rpc.args.PrevLogTerm != rf.log[rpc.args.PrevLogIndex].TermReceived {
@@ -348,8 +351,7 @@ func (rf *Raft) respondAppendEntriesRoutine() {
 			rpc.reply.Success = false
 			rpc.reply.ConflictTerm = conflictTerm
 			rpc.reply.StartOfConflictTerm = binarySearchFindFirst(rf.log, conflictIndex, conflictTerm)
-			rpc.finished = true
-			rf.appendEntriesRPCchan <- rpc
+			rf.handledAppendEntriesRPCRequest <- rpc
 			continue
 		}
 		// now that the PrevLog entry agrees, delete all entries in rf.log
@@ -360,7 +362,7 @@ func (rf *Raft) respondAppendEntriesRoutine() {
 			rf.commitIndex = min(rpc.args.LeaderCommitIndex, len(rf.log)-1)
 		}
 		rpc.reply.Success = true
-		rf.appendEntriesRPCchan <- rpc
+		rf.handledAppendEntriesRPCRequest <- rpc
 	}
 }
 
@@ -412,7 +414,7 @@ func (rf *Raft) electionTimeoutRoutine() {
 // it should also check currentState and return once follower
 func (rf *Raft) kickOffElection() {
 	// send out requestVote RPCs
-	replyChan := make(chan *RequestVoteReplyWrapper)
+	replyChan := make(chan *RequestVoteReply)
 	args := RequestVoteArgs{}
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
@@ -428,22 +430,84 @@ func (rf *Raft) kickOffElection() {
 		}
 	}
 	for { // request vote response handler
-		replyWrapper := <-replyChan
+		reply := <-replyChan
 		if rf.currentTerm > args.Term {
 			// already timed out and kick started a new election
-			break
+			return
 		}
-		if replyWrapper.OK {
-			if replyWrapper.Reply.VoteGranted {
-				currentVoteCounter++
-				if currentVoteCounter > rf.majorityNeed {
-					// elected leader
-					rf.currentState = leader
-					break
-				}
+		if reply.VoteGranted {
+			currentVoteCounter++
+			if currentVoteCounter > rf.majorityNeed {
+				// elected leader
+				rf.currentState = leader
+				go rf.leaderRoutine()
+				return
 			}
 		} else {
-			// resend?
+			// vote not granted
+			// may need to update the term
+			if rf.currentTerm < reply.Term {
+				rf.currentTerm = reply.Term
+				rf.currentState = follower
+				// All Servers: if RPC response contain term > currentTerm
+				// convert to follower
+				return
+			}
+		}
+	}
+}
+
+func (rf *Raft) leaderRoutine() {
+	go rf.sendHeartbeatRoutine() // this handles all heartbeats
+	for {
+		if rf.currentState != leader {
+			return
+		}
+		// leader business
+	}
+}
+
+func (rf *Raft) sendHeartbeatRoutine() {
+	args := AppendEntriesArgs{}
+	for i, _ := range rf.peers {
+		reply := AppendEntriesReply{}
+		if i != rf.me {
+			go rf.sendHeartbeat(i, &args, &reply)
+		}
+	}
+	time.Sleep(getHeartbeatSleepDuration())
+}
+
+func (rf *Raft) sendHeartbeat(peerIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	ok := rf.peers[peerIndex].Call("Raft.appendEntriesReceiverHandler", args, reply)
+	for !ok {
+		// resend?
+		return
+	}
+	rf.rawAppendEntriesRPCResponse <- AppendEntriesRPC{args, reply}
+	// only leaders will send heartbeats and only leaders have to handle AERPC responses
+	return
+}
+
+func (rf *Raft) appendEntriesReceiverHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// receiver side
+	// hand over the RPC to in channel and it will be handled by the routine
+	rf.rawAppendEntriesRPCRequest <- AppendEntriesRPC{args, reply}
+}
+
+func (rf *Raft) appendEntriesSenderHandleResponse() {
+	for {
+		rpc := <-rf.rawAppendEntriesRPCResponse
+		if rpc.reply.Term > rf.currentTerm {
+			// rf is a dated leader
+			rf.currentTerm = rpc.reply.Term
+			rf.currentState = follower
+			return
+		}
+		if rpc.reply.Success {
+			// successfully appended entries on this peer
+		} else {
+			// handle various failures
 		}
 	}
 }
