@@ -19,6 +19,7 @@ package raft
 
 import (
 	"labrpc"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -49,6 +50,28 @@ type LogEntry struct {
 	TermReceived int
 }
 
+type AppendEntriesArgs struct {
+	Term              int         // leader's term
+	LeaderId          int         // this allows followers to redirect client
+	PrevLogIndex      int         // index of log entry in leader's log immediately preceding this new one
+	PrevLogTerm       int         // term of the entry at PrevLogIndex
+	Entries           []*LogEntry // empty for heartbeats, may be more than one
+	LeaderCommitIndex int         // leader's commitIndex
+}
+
+type AppendEntriesReply struct {
+	Term                int  // follower replies its currentTerm, so that leader can update in slice
+	Success             bool // true if follower contained an entry matching PrevLogIndex and PrevLogTerm
+	ConflictTerm        int
+	StartOfConflictTerm int // combine the two to avoid same conflict term in the range
+}
+
+type AppendEntriesRPC struct {
+	args     *AppendEntriesArgs
+	reply    *AppendEntriesReply
+	finished bool
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -61,17 +84,18 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	currentTerm   int
-	votedFor      int
-	log           []*LogEntry
-	commitIndex   int
-	lastApplied   int
-	currentLeader int
-	isCandidate   bool
-	majorityNeed  int
+	currentTerm          int
+	votedFor             int
+	log                  []*LogEntry
+	commitIndex          int
+	lastApplied          int
+	currentLeader        int
+	isCandidate          bool
+	majorityNeed         int
+	appendEntriesRPCchan chan AppendEntriesRPC
 
 	// Leader specific data
-	nextIndex  []int
+	nextIndex  []int // initialize to just after the last one in leader's log when elected
 	matchIndex []int
 
 	// Follower specific data
@@ -128,10 +152,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term         int
-	candidateId  int
-	lastLogIndex int
-	lastLogTerm  int
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -140,21 +164,21 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	term        int
-	voteGranted bool
+	Term        int
+	VoteGranted bool
 }
 
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	if args.term < rf.currentTerm {
-		reply.voteGranted = false
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
 		return
 	}
-	if (rf.votedFor == -1 || rf.votedFor == args.candidateId) &&
-		(rf.currentTerm < args.lastLogTerm || (rf.currentTerm == args.lastLogTerm && rf.commitIndex <= args.lastLogIndex)) {
-		reply.voteGranted = true
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
+		(rf.currentTerm < args.LastLogTerm || (rf.currentTerm == args.LastLogTerm && rf.commitIndex <= args.LastLogIndex)) {
+		reply.VoteGranted = true
 		return
 	}
 }
@@ -248,10 +272,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	entry := LogEntry{nil, 0}
+	rf.log = make([]*LogEntry, 0)
 	rf.log = append(rf.log, &entry)
-	rf.nextIndex = make([]int, len(peers))
-	rf.matchIndex = make([]int, len(peers))
 	rf.majorityNeed = len(peers)/2 + 1
+	rf.appendEntriesRPCchan = make(chan AppendEntriesRPC)
 	rf.currentLeader = -1
 	rf.timeoutResetted = false
 
@@ -265,6 +289,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // Main
 func (rf *Raft) Main(me int) {
+	r := rand.New(rand.NewSource(666))
 	for {
 		if rf.currentLeader == me {
 			// leader business
@@ -272,22 +297,22 @@ func (rf *Raft) Main(me int) {
 			// follower business
 			for rf.currentLeader == -1 || rf.timeoutResetted {
 				rf.timeoutResetted = false
-				time.Sleep(100000000) // ??? TBD
+				time.Sleep(time.Duration(r.Intn(1)) * time.Microsecond * 100) // ??? TBD
 			}
 			// time out, kick off election
 			rf.isCandidate = true
 			rf.currentTerm++
 			args := RequestVoteArgs{}
-			args.candidateId = rf.me
-			args.lastLogIndex = 0
-			args.lastLogTerm = 0
-			args.term = rf.currentTerm
+			args.CandidateId = rf.me
+			args.LastLogIndex = 0
+			args.LastLogTerm = 0
+			args.Term = rf.currentTerm
 			voteCount := 0
 			for i, v := range rf.peers {
 				if i != rf.me {
 					reply := RequestVoteReply{}
 					v.Call("Raft.RequestVote", &args, &reply) // this should be a go routine rather than a potentially blocking function call
-					if reply.voteGranted {
+					if reply.VoteGranted {
 						voteCount++
 					}
 				}
@@ -309,4 +334,74 @@ func (rf *Raft) Main(me int) {
 			}
 		}
 	}
+}
+
+func (rf *Raft) respondAppendEntriesRPC() {
+	for {
+		rpc := <-rf.appendEntriesRPCchan
+		if rpc.args.Term < rf.currentTerm { // the server sending this RPC thinks it is the leader,
+			// while it is actually not
+			// this may occur when a broken internet connection suddenly comes live
+			rpc.reply.Term = rf.currentTerm // the fake leader shall convert to follower after receiving
+			rpc.reply.Success = false
+			rpc.finished = true
+			rf.appendEntriesRPCchan <- rpc
+			continue
+		}
+		if rpc.args.Term > rf.currentTerm {
+			rf.currentTerm = rpc.args.Term
+			rpc.reply.Term = rpc.args.Term
+			// convert to follower
+		}
+		if rpc.args.PrevLogIndex > len(rf.log)-1 { // len(rf.log) - 1 is the last index in log
+			rpc.reply.Success = false
+			rpc.reply.ConflictTerm = 0 // force leader to check len(rf.log) - 1 in next RPC
+			rpc.reply.StartOfConflictTerm = len(rf.log)
+			rpc.finished = true
+			rf.appendEntriesRPCchan <- rpc
+			continue
+		}
+		if rpc.args.PrevLogTerm != rf.log[rpc.args.PrevLogIndex].TermReceived {
+			conflictIndex := rpc.args.PrevLogIndex
+			// does not contain an entry at prevLogIndex
+			conflictTerm := rf.log[conflictIndex].TermReceived
+			rpc.reply.Success = false
+			rpc.reply.ConflictTerm = conflictTerm
+			rpc.reply.StartOfConflictTerm = binarySearchFindFirst(rf.log, conflictIndex, conflictTerm)
+			rpc.finished = true
+			rf.appendEntriesRPCchan <- rpc
+			continue
+		}
+		// now that the PrevLog entry agrees, delete all entries in rf.log
+		// that does not agree with those in rpc.args.entries
+		rf.log = append(rf.log[0:rpc.args.PrevLogIndex+1], rpc.args.Entries[rpc.args.PrevLogIndex+1:]...)
+		// now check if commit any entry
+		if rpc.args.LeaderCommitIndex > rf.commitIndex {
+			rf.commitIndex = min(rpc.args.LeaderCommitIndex, len(rf.log)-1)
+		}
+		rpc.reply.Success = true
+		rf.appendEntriesRPCchan <- rpc
+	}
+}
+
+func binarySearchFindFirst(log []*LogEntry, end int, targetTerm int) int {
+	start := 1
+	for start < end-1 {
+		mid := start + (end-start)/2
+		if log[mid].TermReceived == targetTerm {
+			end = mid
+		} else {
+			start = mid + 1
+		}
+	}
+	if log[start].TermReceived == targetTerm {
+		return start
+	} else {
+		return start + 1
+	}
+}
+
+func (rf *Raft) sendAppendEntriesRPC() {
+	// only start if leader
+	// should be accompanied by a timer for every server
 }
