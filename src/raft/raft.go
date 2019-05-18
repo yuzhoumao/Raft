@@ -170,6 +170,11 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type RequestVoteReplyWrapper struct {
+	Reply *RequestVoteReply
+	OK    bool
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -214,9 +219,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, replyChan chan<- *RequestVoteReplyWrapper) {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+	replyChan <- &RequestVoteReplyWrapper{reply, ok}
+	return
 }
 
 //
@@ -351,10 +357,10 @@ func (rf *Raft) respondAppendEntriesRPC() {
 			rf.appendEntriesRPCchan <- rpc
 			continue
 		}
-		if rpc.args.Term > rf.currentTerm {
+		if rpc.args.Term >= rf.currentTerm {
 			rf.currentTerm = rpc.args.Term
 			rpc.reply.Term = rpc.args.Term
-			// convert to follower
+			rf.currentState = follower
 		}
 		if rpc.args.PrevLogIndex > len(rf.log)-1 { // len(rf.log) - 1 is the last index in log
 			rpc.reply.Success = false
@@ -415,15 +421,17 @@ func (rf *Raft) electionTimeoutRoutine() {
 			rf.electionTimerResetted = false
 			time.Sleep(getElectionSleepDuration())
 		} else {
-			// timed out
+			// timed out while not being a leader
+			// convert to candidate if still a follower
 			if rf.currentState == follower {
 				// convert to candidate
 				rf.currentState = candidate
-				rf.currentTerm++
 				rf.currentElection = 0
 			}
+			// if election Timeout elapse, start a new election
 			if rf.currentState == candidate {
 				rf.electionTimerResetted = true
+				rf.currentTerm++
 				rf.currentElection++
 				go rf.kickOffElection(rf.currentElection)
 			}
@@ -432,11 +440,41 @@ func (rf *Raft) electionTimeoutRoutine() {
 }
 
 // kickOffElection should constantly check currentElection and return once < currentElection
+// it should also check currentState and return once follower
 func (rf *Raft) kickOffElection(electionCounter int) {
-	// on conversion to candidate, start election
-	// currentTerm++
-	// vote for self
-	// reset the election timer
 	// send out requestVote RPCs
-	// if election Timeout elapse, start a new election
+	replyChan := make(chan *RequestVoteReplyWrapper)
+	args := RequestVoteArgs{}
+	args.CandidateId = rf.me
+	args.LastLogIndex = 0
+	args.LastLogTerm = 0
+	args.Term = rf.currentTerm
+	currentVoteCounter := 1
+	for i, _ := range rf.peers {
+		reply := RequestVoteReply{}
+		if i != rf.me {
+			go rf.sendRequestVote(i, &args, &reply, replyChan)
+			// if the RPC times out, the go routine will return false
+			// should the RequestVote RPC be sent again?
+		}
+	}
+	for {
+		replyWrapper := <-replyChan
+		if rf.currentTerm > args.Term {
+			// already timed out and kick started a new election
+			break
+		}
+		if replyWrapper.OK {
+			if replyWrapper.Reply.VoteGranted {
+				currentVoteCounter++
+				if currentVoteCounter > rf.majorityNeed {
+					// elected leader
+					rf.currentState = leader
+					break
+				}
+			}
+		} else {
+			// resend?
+		}
+	}
 }
