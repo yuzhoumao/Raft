@@ -88,12 +88,10 @@ type Raft struct {
 	log                            []*LogEntry
 	commitIndex                    int
 	lastApplied                    int
-	currentLeader                  int
 	currentState                   RaftServerState
 	majorityNeed                   int
 	rawAppendEntriesRPCRequest     chan AppendEntriesRPC
 	handledAppendEntriesRPCRequest chan AppendEntriesRPC
-	rawAppendEntriesRPCResponse    chan AppendEntriesRPC
 	electionTimerResetted          bool
 
 	// Leader specific data
@@ -107,7 +105,7 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	return rf.currentTerm, rf.currentLeader == rf.me
+	return rf.currentTerm, rf.currentState == leader
 }
 
 //
@@ -244,7 +242,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	if rf.currentLeader != rf.me {
+	if rf.currentState != leader {
 		return -1, -1, false
 	}
 	entry := LogEntry{command, rf.currentTerm}
@@ -383,11 +381,6 @@ func binarySearchFindFirst(log []*LogEntry, end int, targetTerm int) int {
 	}
 }
 
-func (rf *Raft) sendAppendEntriesRPC() {
-	// only start if in leader state, should stop if converts to follower
-	// should be accompanied by a timer for every server
-}
-
 func (rf *Raft) electionTimeoutRoutine() {
 	for {
 		if rf.electionTimerResetted || rf.currentState == leader {
@@ -458,53 +451,91 @@ func (rf *Raft) kickOffElection() {
 }
 
 func (rf *Raft) leaderRoutine() {
-	go rf.sendHeartbeatRoutine() // this handles all heartbeats
+	replyChan := make(chan *AppendEntriesReply)
+	go rf.appendEntriesSenderHandleResponse(replyChan)
+	go rf.sendHeartbeatRoutine(replyChan) // this handles all heartbeats
+
 	for {
 		if rf.currentState != leader {
 			return
 		}
-		// leader business
-	}
-}
-
-func (rf *Raft) sendHeartbeatRoutine() {
-	args := AppendEntriesArgs{}
-	for i, _ := range rf.peers {
-		reply := AppendEntriesReply{}
-		if i != rf.me {
-			go rf.sendHeartbeat(i, &args, &reply)
+		for i, _ := range rf.peers {
+			if i != rf.me {
+				// if last log index >= nextIndex for a follower
+				// send AE rpc with log entries starting at nextIndex
+				if rf.nextIndex[i] < len(rf.log)-1 {
+					go rf.sendRealAppendEntries(i, replyChan)
+				}
+				// if success update internal record
+				// if fail retry with lower index
+			}
 		}
+		// if there is an N such that N > commitIndex, commit
+
 	}
-	time.Sleep(getHeartbeatSleepDuration())
 }
 
-func (rf *Raft) sendHeartbeat(peerIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) sendRealAppendEntries(peerIndex int, replyChan chan *AppendEntriesReply) {
+	// only start if in leader state, should stop if converts to follower
+	// should be accompanied by a timer for every server
+	args, replyBefore := AppendEntriesArgs{}, AppendEntriesReply{}
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+	args.PrevLogIndex = rf.nextIndex[peerIndex] - 1
+	args.PrevLogTerm = rf.log[args.PrevLogIndex].TermReceived
+	args.Entries = rf.log[args.PrevLogIndex+1:]
+	args.LeaderCommitIndex = rf.commitIndex
+	go rf.sendAppendEntriesBoth(peerIndex, &args, &replyBefore, replyChan)
+}
+
+func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesReply) {
+	for {
+		if rf.currentState != leader {
+			return
+		}
+		args := AppendEntriesArgs{}
+		for i, _ := range rf.peers {
+			reply := AppendEntriesReply{}
+			if i != rf.me {
+				go rf.sendAppendEntriesBoth(i, &args, &reply, replyChan)
+			}
+		}
+		time.Sleep(getHeartbeatSleepDuration())
+	}
+}
+
+func (rf *Raft) sendAppendEntriesBoth(peerIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply, replyChan chan *AppendEntriesReply) {
 	ok := rf.peers[peerIndex].Call("Raft.appendEntriesReceiverHandler", args, reply)
 	for !ok {
 		// resend?
 		return
 	}
-	rf.rawAppendEntriesRPCResponse <- AppendEntriesRPC{args, reply}
+	replyChan <- reply
 	// only leaders will send heartbeats and only leaders have to handle AERPC responses
 	return
 }
 
+// ReceiverHandler takes the reply and sends into the channel
+// which is actively listened by respondAppendEntriesRoutine
 func (rf *Raft) appendEntriesReceiverHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// receiver side
 	// hand over the RPC to in channel and it will be handled by the routine
 	rf.rawAppendEntriesRPCRequest <- AppendEntriesRPC{args, reply}
 }
 
-func (rf *Raft) appendEntriesSenderHandleResponse() {
+func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesReply) {
 	for {
-		rpc := <-rf.rawAppendEntriesRPCResponse
-		if rpc.reply.Term > rf.currentTerm {
+		reply := <-replyChan
+		if rf.currentState != leader {
+			return
+		}
+		if reply.Term > rf.currentTerm {
 			// rf is a dated leader
-			rf.currentTerm = rpc.reply.Term
+			rf.currentTerm = reply.Term
 			rf.currentState = follower
 			return
 		}
-		if rpc.reply.Success {
+		if reply.Success {
 			// successfully appended entries on this peer
 		} else {
 			// handle various failures
