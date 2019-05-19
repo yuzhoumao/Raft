@@ -47,3 +47,19 @@ func getHeartbeatSleepDuration() time.Duration {
 	return time.Duration(200) * time.Millisecond
 	// this should be just a constant period
 }
+
+func binarySearchFindFirst(log []*LogEntry, end int, targetTerm int) int {
+	start := 1
+	for start < end-1 {
+		mid := start + (end-start)/2
+		if log[mid].TermReceived == targetTerm {
+			end = mid
+		} else {
+			start = mid + 1
+		}
+	}
+	if log[start].TermReceived == targetTerm {
+		return start
+	}
+	return start + 1
+}
