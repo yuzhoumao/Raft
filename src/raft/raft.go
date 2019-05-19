@@ -92,8 +92,8 @@ type Raft struct {
 	lastApplied                    int
 	currentState                   RaftServerState
 	majorityNeed                   int
-	rawAppendEntriesRPCRequest     chan AppendEntriesRPC
-	handledAppendEntriesRPCRequest chan AppendEntriesRPC
+	rawAppendEntriesRPCRequest     chan *AppendEntriesRPC
+	handledAppendEntriesRPCRequest chan *AppendEntriesRPC
 	electionTimerResetted          bool
 
 	// Leader specific data
@@ -298,12 +298,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.majorityNeed = len(peers)/2 + 1
 
 	// TODO: add other variable inits
-	rf.rawAppendEntriesRPCRequest = make(chan AppendEntriesRPC)
-	rf.handledAppendEntriesRPCRequest = make(chan AppendEntriesRPC)
+	rf.rawAppendEntriesRPCRequest = make(chan *AppendEntriesRPC)
+	rf.handledAppendEntriesRPCRequest = make(chan *AppendEntriesRPC)
 
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	for i, _ := range rf.peers {
+	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
 	}
@@ -321,84 +321,75 @@ func (rf *Raft) Main() {
 	go rf.electionTimeoutRoutine()
 	go rf.respondAppendEntriesRoutine()
 	for {
+		rf.mu.Lock()
 		if rf.commitIndex > rf.lastApplied {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				rf.applyCh <- ApplyMsg{true, rf.log[i].Command, i}
 			}
 			rf.lastApplied = rf.commitIndex
 		}
+		rf.mu.Unlock()
 	}
 }
 
 func (rf *Raft) respondAppendEntriesRoutine() {
 	for {
 		rpc := <-rf.rawAppendEntriesRPCRequest
-		if rpc.args.Term < rf.currentTerm { // the server sending this RPC thinks it is the leader,
-			// while it is actually not
-			// this may occur when a broken internet connection suddenly comes live
-			rpc.reply.Term = rf.currentTerm // the fake leader shall convert to follower after receiving
-			rpc.reply.Success = false
-			rf.handledAppendEntriesRPCRequest <- rpc
-			continue
-		}
-		if rpc.args.Term >= rf.currentTerm {
-			rf.currentTerm = rpc.args.Term
-			rpc.reply.Term = rpc.args.Term
-			rf.currentState = follower // receiver side conversion
-			rf.electionTimerResetted = true
-			// All Servers: if RPC response contain term > currentTerm
-			// convert to follower
-		}
-		if rpc.args.PrevLogIndex > len(rf.log)-1 { // len(rf.log) - 1 is the last index in log
-			rpc.reply.Success = false
-			rpc.reply.ConflictTerm = 0 // force leader to check len(rf.log) - 1 in next RPC
-			rpc.reply.StartOfConflictTerm = len(rf.log)
-			rf.handledAppendEntriesRPCRequest <- rpc
-			continue
-		}
-		if rpc.args.PrevLogTerm != rf.log[rpc.args.PrevLogIndex].TermReceived {
-			conflictIndex := rpc.args.PrevLogIndex
-			// does not contain an entry at prevLogIndex
-			conflictTerm := rf.log[conflictIndex].TermReceived
-			rpc.reply.Success = false
-			rpc.reply.ConflictTerm = conflictTerm
-			rpc.reply.StartOfConflictTerm = binarySearchFindFirst(rf.log, conflictIndex, conflictTerm)
-			rf.handledAppendEntriesRPCRequest <- rpc
-			continue
-		}
-		// now that the PrevLog entry agrees, delete all entries in rf.log
-		// that does not agree with those in rpc.args.entries
-		rf.log = append(rf.log[0:rpc.args.PrevLogIndex+1], rpc.args.Entries[rpc.args.PrevLogIndex+1:]...)
-		// now check if commit any entry
-		if rpc.args.LeaderCommitIndex > rf.commitIndex {
-			rf.commitIndex = min(rpc.args.LeaderCommitIndex, len(rf.log)-1)
-		}
-		rpc.reply.Success = true
+		rf.respondAppendEntriesRoutineHelper(rpc)
 		rf.handledAppendEntriesRPCRequest <- rpc
 	}
 }
 
-func binarySearchFindFirst(log []*LogEntry, end int, targetTerm int) int {
-	start := 1
-	for start < end-1 {
-		mid := start + (end-start)/2
-		if log[mid].TermReceived == targetTerm {
-			end = mid
-		} else {
-			start = mid + 1
-		}
+func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rpc.args.Term < rf.currentTerm { // the server sending this RPC thinks it is the leader,
+		// while it is actually not
+		// this may occur when a broken internet connection suddenly comes live
+		rpc.reply.Term = rf.currentTerm // the fake leader shall convert to follower after receiving
+
+		rpc.reply.Success = false
+		return
 	}
-	if log[start].TermReceived == targetTerm {
-		return start
-	} else {
-		return start + 1
+	if rpc.args.Term >= rf.currentTerm {
+		rf.currentTerm = rpc.args.Term
+		rpc.reply.Term = rpc.args.Term
+		rf.currentState = follower // receiver side conversion
+		rf.electionTimerResetted = true
+		// All Servers: if RPC response contain term > currentTerm
+		// convert to follower
 	}
+	if rpc.args.PrevLogIndex > len(rf.log)-1 { // len(rf.log) - 1 is the last index in log
+		rpc.reply.Success = false
+		rpc.reply.ConflictTerm = 0 // force leader to check len(rf.log) - 1 in next RPC
+		rpc.reply.StartOfConflictTerm = len(rf.log)
+		return
+	}
+	if rpc.args.PrevLogTerm != rf.log[rpc.args.PrevLogIndex].TermReceived {
+		conflictIndex := rpc.args.PrevLogIndex
+		// does not contain an entry at prevLogIndex
+		conflictTerm := rf.log[conflictIndex].TermReceived
+		rpc.reply.Success = false
+		rpc.reply.ConflictTerm = conflictTerm
+		rpc.reply.StartOfConflictTerm = binarySearchFindFirst(rf.log, conflictIndex, conflictTerm)
+		return
+	}
+	// now that the PrevLog entry agrees, delete all entries in rf.log
+	// that does not agree with those in rpc.args.entries
+	rf.log = append(rf.log[0:rpc.args.PrevLogIndex+1], rpc.args.Entries[rpc.args.PrevLogIndex+1:]...)
+	// now check if commit any entry
+	if rpc.args.LeaderCommitIndex > rf.commitIndex {
+		rf.commitIndex = min(rpc.args.LeaderCommitIndex, len(rf.log)-1)
+	}
+	rpc.reply.Success = true
 }
 
 func (rf *Raft) electionTimeoutRoutine() {
 	for {
+		rf.mu.Lock()
 		if rf.electionTimerResetted || rf.currentState == leader {
 			rf.electionTimerResetted = false
+			rf.mu.Unlock()
 			time.Sleep(getElectionSleepDuration())
 		} else {
 			// timed out while not being a leader
@@ -414,6 +405,7 @@ func (rf *Raft) electionTimeoutRoutine() {
 				go rf.kickOffElection()
 			}
 		}
+		rf.mu.Unlock()
 	}
 }
 
@@ -423,12 +415,14 @@ func (rf *Raft) kickOffElection() {
 	// send out requestVote RPCs
 	replyChan := make(chan *RequestVoteReply)
 	args := RequestVoteArgs{}
+	rf.mu.Lock()
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
 	args.LastLogIndex = len(rf.log) - 1
 	args.LastLogTerm = rf.log[args.LastLogIndex].TermReceived
+	rf.mu.Unlock()
 	currentVoteCounter := 1
-	for i, _ := range rf.peers {
+	for i := range rf.peers {
 		reply := RequestVoteReply{}
 		if i != rf.me {
 			go rf.sendRequestVote(i, &args, &reply, replyChan)
@@ -438,8 +432,10 @@ func (rf *Raft) kickOffElection() {
 	}
 	for { // request vote response handler
 		reply := <-replyChan
+		rf.mu.Lock()
 		if rf.currentTerm > args.Term {
 			// already timed out and kick started a new election
+			rf.mu.Unlock()
 			return
 		}
 		if reply.VoteGranted {
@@ -448,6 +444,7 @@ func (rf *Raft) kickOffElection() {
 				// elected leader
 				rf.currentState = leader
 				go rf.leaderRoutine()
+				rf.mu.Unlock()
 				return
 			}
 		} else {
@@ -459,9 +456,11 @@ func (rf *Raft) kickOffElection() {
 				rf.electionTimerResetted = true
 				// All Servers: if RPC response contain term > currentTerm
 				// convert to follower
+				rf.mu.Unlock()
 				return
 			}
 		}
+		rf.mu.Unlock() // don't hold the lock while listening on channel
 	}
 }
 
@@ -471,10 +470,12 @@ func (rf *Raft) leaderRoutine() {
 	go rf.sendHeartbeatRoutine(replyChan) // this handles all heartbeats
 
 	for {
+		rf.mu.Lock()
 		if rf.currentState != leader {
+			rf.mu.Unlock()
 			return
 		}
-		for i, _ := range rf.peers {
+		for i := range rf.peers {
 			if i != rf.me {
 				// if last log index >= nextIndex for a follower
 				// send AE rpc with log entries starting at nextIndex
@@ -485,8 +486,10 @@ func (rf *Raft) leaderRoutine() {
 				// if fail retry with lower index
 			}
 		}
+		rf.mu.Unlock()
 		// if there is an N such that N > commitIndex, commit
 		// followers will learn about the commit later during RPC handling
+		// NOTE: commit is done after Success AE reply, not here
 	}
 }
 
@@ -494,22 +497,26 @@ func (rf *Raft) sendRealAppendEntries(peerIndex int, replyChan chan *AppendEntri
 	// only start if in leader state, should stop if converts to follower
 	// should be accompanied by a timer for every server
 	args, replyBefore := AppendEntriesArgs{}, AppendEntriesReply{}
+	rf.mu.Lock()
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
 	args.PrevLogIndex = rf.nextIndex[peerIndex] - 1
 	args.PrevLogTerm = rf.log[args.PrevLogIndex].TermReceived
 	args.Entries = rf.log[args.PrevLogIndex+1:]
 	args.LeaderCommitIndex = rf.commitIndex
+	rf.mu.Unlock()
 	go rf.sendAppendEntriesBoth(peerIndex, &args, &replyBefore, replyChan)
 }
 
 func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
 	for {
+		rf.mu.Lock()
 		if rf.currentState != leader {
+			rf.mu.Unlock()
 			return
 		}
 		args := AppendEntriesArgs{}
-		for i, _ := range rf.peers {
+		for i := range rf.peers {
 			reply := AppendEntriesReply{}
 			if i != rf.me {
 				go rf.sendAppendEntriesBoth(i, &args, &reply, replyChan)
@@ -535,13 +542,15 @@ func (rf *Raft) sendAppendEntriesBoth(peerIndex int, args *AppendEntriesArgs, re
 func (rf *Raft) appendEntriesReceiverHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// receiver side
 	// hand over the RPC to in channel and it will be handled by the routine
-	rf.rawAppendEntriesRPCRequest <- AppendEntriesRPC{args, reply, rf.me}
+	rf.rawAppendEntriesRPCRequest <- &AppendEntriesRPC{args, reply, rf.me}
 }
 
 func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesRPC) {
 	for {
 		rpc := <-replyChan
+		rf.mu.Lock()
 		if rf.currentState != leader {
+			rf.mu.Unlock()
 			return
 		}
 		if rpc.reply.Term > rf.currentTerm {
@@ -549,6 +558,7 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 			rf.currentTerm = rpc.reply.Term
 			rf.currentState = follower // sender side conversion
 			rf.electionTimerResetted = true
+			rf.mu.Unlock()
 			return
 		}
 		if rpc.reply.Success {
@@ -565,14 +575,19 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 			rf.nextIndex[rpc.peerIndex] = rpc.reply.StartOfConflictTerm - 1 // skip those in between
 			go rf.sendRealAppendEntries(rpc.peerIndex, replyChan)           // retry
 		}
+		rf.mu.Unlock() // should not hold the lock while reading from any channel, in this case replyChan
 	}
 }
 
 func (rf *Raft) updateLeaderCommitIndex() {
+	rf.mu.Lock()
 	matchIndex := append(make([]int, 0), rf.matchIndex...)
+	rf.mu.Unlock()
 	sort.Sort(sort.IntSlice(matchIndex))
 	medianCommitIndex := matchIndex[rf.majorityNeed-1]
+	rf.mu.Lock()
 	if medianCommitIndex > rf.commitIndex && rf.log[medianCommitIndex].TermReceived == rf.currentTerm {
 		rf.commitIndex = medianCommitIndex
 	}
+	rf.mu.Unlock()
 }
