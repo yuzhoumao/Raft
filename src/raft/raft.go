@@ -197,6 +197,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// at least as uptodate
 		reply.Term = args.Term
 		reply.VoteGranted = true
+		DPrintf("%d granted vote to Raft # %d in term # %d", rf.me, args.CandidateId, reply.Term)
+		rf.electionTimerResetted = true
+		DPrintf("Raft # %d resetted timer", rf.me)
 		rf.votedFor = args.CandidateId
 		return
 	}
@@ -265,10 +268,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.currentState != leader {
 		return -1, -1, false
 	}
+	DPrintf("Raft # %d log length %d", rf.me, len(rf.log))
 	entry := LogEntry{command, rf.currentTerm}
 	rf.log = append(rf.log, &entry)
 	// Your code here (2B).
-
+	DPrintf("Raft # %d accepted the command", rf.me)
+	DPrintf("Raft # %d log length %d", rf.me, len(rf.log))
 	return len(rf.log) - 1, rf.currentTerm, true
 }
 
@@ -499,7 +504,6 @@ func (rf *Raft) kickOffElection() {
 			rf.mu.Unlock()
 			return
 		}
-		DPrintf("Vote granted for Raft # %d in term # %d", rf.me, reply.Term)
 		DPrintf("Raft # %d is in term # %d", rf.me, rf.currentTerm)
 		if reply.VoteGranted && reply.Term == rf.currentTerm {
 			currentVoteCounter++
@@ -532,9 +536,8 @@ func (rf *Raft) kickOffElection() {
 func (rf *Raft) leaderRoutine() {
 	DPrintf("Raft # %d in function leaderRoutine()", rf.me)
 	replyChan := make(chan *AppendEntriesRPC)
-	go rf.appendEntriesSenderHandleResponse(replyChan)
 	go rf.sendHeartbeatRoutine(replyChan) // this handles all heartbeats
-
+	go rf.appendEntriesSenderHandleResponse(replyChan)
 	for {
 		rf.mu.Lock()
 		if rf.currentState != leader {
@@ -545,7 +548,9 @@ func (rf *Raft) leaderRoutine() {
 			if i != rf.me {
 				// if last log index >= nextIndex for a follower
 				// send AE rpc with log entries starting at nextIndex
-				if rf.nextIndex[i] < len(rf.log)-1 {
+				if rf.nextIndex[i] <= len(rf.log)-1 {
+					DPrintf("Raft # %d log length %d", rf.me, len(rf.log))
+					DPrintf("Raft # %d nextIndexd %d", i, rf.nextIndex[i] - 1)
 					go rf.sendRealAppendEntries(i, replyChan)
 				}
 				// if success update internal record
@@ -553,6 +558,7 @@ func (rf *Raft) leaderRoutine() {
 			}
 		}
 		rf.mu.Unlock()
+		time.Sleep(2 * getHeartbeatSleepDuration())
 		// if there is an N such that N > commitIndex, commit
 		// followers will learn about the commit later during RPC handling
 		// NOTE: commit is done after Success AE reply, not here
