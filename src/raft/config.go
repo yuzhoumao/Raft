@@ -259,7 +259,7 @@ func (cfg *config) disconnect(i int) {
 	// fmt.Printf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false
-
+	DPrintf("Disconnected Raft # %d", i)
 	// outgoing ClientEnds
 	for j := 0; j < cfg.n; j++ {
 		if cfg.endnames[i] != nil {
@@ -320,6 +320,8 @@ func (cfg *config) checkOneLeader() int {
 		}
 
 		if len(leaders) != 0 {
+			DPrintf("TEST checkOneLeader() found %d leaders", len(leaders))
+			DPrintf("TEST checkOneLeader() returning leader %d", leaders[lastTermWithLeader][0])
 			return leaders[lastTermWithLeader][0]
 		}
 	}
