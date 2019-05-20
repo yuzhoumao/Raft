@@ -179,9 +179,6 @@ type RequestVoteReplyWrapper struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	DPrintf("RequestVote() receiver Raft %+v", rf)
-	defer DPrintf("RequestVote() receiver Raft %+v", args)
-	defer DPrintf("RequestVote() receiver Raft %+v", reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
@@ -350,10 +347,11 @@ func (rf *Raft) Main() {
 	go rf.respondAppendEntriesRoutine()
 	DPrintf("Raft # %d entering applyMsg loop in Main()", rf.me)
 	for {
+		rf.mu.Lock()
 		if rf.currentState == killed {
+			rf.mu.Unlock()
 			return
 		}
-		rf.mu.Lock()
 		if rf.commitIndex > rf.lastApplied {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				rf.applyCh <- ApplyMsg{true, rf.log[i].Command, i}
@@ -367,9 +365,11 @@ func (rf *Raft) Main() {
 func (rf *Raft) respondAppendEntriesRoutine() {
 	DPrintf("Raft # %d in function respondAppendEntriesRoutine()", rf.me)
 	for {
+		rf.mu.Lock()
 		if rf.currentState == killed {
 			return
 		}
+		rf.mu.Unlock()
 		rpc := <-rf.rawAppendEntriesRPCRequest
 		rf.respondAppendEntriesRoutineHelper(rpc)
 		rf.handledAppendEntriesRPCRequest <- rpc
@@ -610,7 +610,10 @@ func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
 
 func (rf *Raft) sendAppendEntriesBoth(peerIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply, replyChan chan *AppendEntriesRPC) {
 	DPrintf("Raft # %d in function sendAppendEntriesBoth()", rf.me)
-	ok := rf.peers[peerIndex].Call("Raft.AppendEntriesReceiverHandler", args, reply)
+	rf.mu.Lock()
+	ce := rf.peers[peerIndex]
+	rf.mu.Unlock()
+	ok := ce.Call("Raft.AppendEntriesReceiverHandler", args, reply)
 	for !ok {
 		// resend?
 		DPrintf("Raft # %d packet dropped", rf.me)
