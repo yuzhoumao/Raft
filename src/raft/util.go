@@ -36,6 +36,7 @@ const (
 	follower RaftServerState = iota
 	candidate
 	leader
+	killed
 )
 
 func getElectionSleepDuration() time.Duration {
