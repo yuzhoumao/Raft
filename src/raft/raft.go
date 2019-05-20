@@ -180,13 +180,19 @@ type RequestVoteReplyWrapper struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf("RequestVote() args.Term %d", args.Term)
+	DPrintf("RequestVote() rf.currentTerm %d", rf.currentTerm)
 	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
 		(rf.currentTerm < args.LastLogTerm || (rf.currentTerm == args.LastLogTerm && rf.commitIndex <= args.LastLogIndex)) {
+		// at least as uptodate
+		reply.Term = args.Term
 		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
 		return
 	}
 }
@@ -222,6 +228,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, replyChan chan<- *RequestVoteReply) {
 	DPrintf("Raft # %d in function sendRequestVote()", rf.me)
+	DPrintf("args.Term %d", args.Term)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	for !ok {
 		// resend?
@@ -286,7 +293,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	DPrintf("Raft # %d called rf.Make", rf.me)
 	rf.applyCh = applyCh
 
 	rf.currentTerm = 0
@@ -314,7 +320,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.matchIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
-		DPrintf("Raft # %d rf.nextIndex[%d]: %d", rf.me, i, len(rf.log))
 		rf.matchIndex[i] = 0
 	}
 
@@ -323,7 +328,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// start main routine
 	go rf.Main()
 	// end of Raft server instantiation
-	DPrintf("Raft # %d started rf.Main() routine", rf.me)
 	return rf
 }
 
@@ -369,6 +373,7 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 	} else {
 		rf.currentTerm = rpc.args.Term
 		rpc.reply.Term = rpc.args.Term
+		DPrintf("rf.currentTerm %d, rpc.args.Term %d, rpc.reply.Term %d", rf.currentTerm, rpc.args.Term, rpc.reply.Term)
 		rf.currentState = follower // receiver side conversion
 		DPrintf("Raft # %d converting to follower in Helper()", rf.me)
 		// All Servers: if RPC response contain term > currentTerm
@@ -429,7 +434,7 @@ func (rf *Raft) electionTimeoutRoutine() {
 			if rf.currentState == candidate {
 				rf.electionTimerResetted = true
 				rf.currentTerm++
-				DPrintf("Raft server # %d kicks off an election", rf.me)
+				DPrintf("Raft server # %d kicks off an election in term %d", rf.me, rf.currentTerm)
 				go rf.kickOffElection()
 			}
 			rf.mu.Unlock()
@@ -446,6 +451,7 @@ func (rf *Raft) kickOffElection() {
 	args := RequestVoteArgs{}
 	rf.mu.Lock()
 	args.Term = rf.currentTerm
+	DPrintf("rf.currentTerm %d", rf.currentTerm)
 	args.CandidateId = rf.me
 	args.LastLogIndex = len(rf.log) - 1
 	args.LastLogTerm = rf.log[args.LastLogIndex].TermReceived
@@ -469,8 +475,9 @@ func (rf *Raft) kickOffElection() {
 			rf.mu.Unlock()
 			return
 		}
-		if reply.VoteGranted {
-			DPrintf("Vote granted for Raft # %d", rf.me)
+		DPrintf("Vote granted for Raft # %d in term # %d", rf.me, reply.Term)
+		DPrintf("Raft # %d is in term # %d", rf.me, rf.currentTerm)
+		if reply.VoteGranted && reply.Term == rf.currentTerm {
 			currentVoteCounter++
 			if currentVoteCounter > rf.majorityNeed {
 				// elected leader
@@ -550,18 +557,27 @@ func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
 	DPrintf("Raft # %d in function sendHeartbeatRoutine()", rf.me)
 	for {
 		rf.mu.Lock()
+		DPrintf("Raft # %d believes it is LEADER: %t", rf.me, rf.currentState == leader)
 		if rf.currentState != leader {
 			rf.mu.Unlock()
 			return
 		}
-		rf.mu.Unlock()
 		args := AppendEntriesArgs{}
+		args.Term = rf.currentTerm
+		DPrintf("LEADER Raft # %d in term %d", rf.me, args.Term)
+		args.LeaderId = rf.me
+		args.LeaderCommitIndex = rf.commitIndex
 		for i := range rf.peers {
+			args.PrevLogIndex = rf.nextIndex[i] - 1
+			DPrintf("LEADER Raft # %d rpc PrevLogIndex %d", rf.me, args.PrevLogIndex)
+			args.PrevLogTerm = rf.log[args.PrevLogIndex].TermReceived
+			DPrintf("LEADER Raft # %d rpc PrevLogTerm %d", rf.me, args.PrevLogTerm)
 			reply := AppendEntriesReply{}
 			if i != rf.me {
 				go rf.sendAppendEntriesBoth(i, &args, &reply, replyChan)
 			}
 		}
+		rf.mu.Unlock()
 		DPrintf("Raft # %d sent out heart beats and going to sleep", rf.me)
 		time.Sleep(getHeartbeatSleepDuration())
 	}
@@ -610,6 +626,7 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 			return
 		}
 		DPrintf("Raft # %d rpc.reply.Success %t", rf.me, rpc.reply.Success)
+		DPrintf("Raft # %d rpc.reply.Term %d", rf.me, rpc.reply.Term)
 		if rpc.reply.Success {
 			// successfully appended entries on this peer, update internal storage
 			remoteLen := len(rpc.args.Entries)
