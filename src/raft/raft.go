@@ -64,6 +64,7 @@ type AppendEntriesReply struct {
 	Success             bool // true if follower contained an entry matching PrevLogIndex and PrevLogTerm
 	ConflictTerm        int
 	StartOfConflictTerm int // combine the two to avoid same conflict term in the range
+	NextIndex           int
 }
 
 type AppendEntriesRPC struct {
@@ -406,6 +407,7 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 	rf.electionTimerResetted = true
 	DPrintf("Raft # %d rpc.args.PrevLogIndex %d len(rf.log) %d", rf.me, rpc.args.PrevLogIndex, len(rf.log))
 	if rpc.args.PrevLogIndex > len(rf.log)-1 { // len(rf.log) - 1 is the last index in log
+		// tell leader to retry
 		rpc.reply.Success = false
 		rpc.reply.ConflictTerm = 0 // force leader to check len(rf.log) - 1 in next RPC
 		rpc.reply.StartOfConflictTerm = len(rf.log)
@@ -413,6 +415,7 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 	}
 	DPrintf("Raft # %d rpc.args.PrevLogTerm %d rf.log[rpc.args.PrevLogIndex].TermReceived %d", rf.me, rpc.args.PrevLogTerm, rf.log[rpc.args.PrevLogIndex].TermReceived)
 	if rpc.args.PrevLogTerm != rf.log[rpc.args.PrevLogIndex].TermReceived {
+		// tell leader to retry
 		conflictIndex := rpc.args.PrevLogIndex
 		// does not contain an entry at prevLogIndex
 		conflictTerm := rf.log[conflictIndex].TermReceived
@@ -423,16 +426,35 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 	}
 	// now that the PrevLog entry agrees, delete all entries in rf.log
 	// that does not agree with those in rpc.args.entries
-	DPrintf("Raft # %d appending after PrevLogIndex %d", rf.me, rpc.args.PrevLogIndex)
-	if len(rpc.args.Entries) > 0 {
-		rf.log = append(rf.log[0:rpc.args.PrevLogIndex+1], rpc.args.Entries...)
-	}
+	rf.mergeEntries(rpc.args)
+	rpc.reply.NextIndex = len(rf.log)
 	// now check if commit any entry
 	if rpc.args.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = min(rpc.args.LeaderCommitIndex, len(rf.log)-1)
 	}
 	rpc.reply.Success = true
 	DPrintf("Raft # %d returning from Helper()", rf.me)
+}
+
+func (rf *Raft) mergeEntries(args *AppendEntriesArgs) {
+	// should work in case of hb msg
+	selfLogLen := len(rf.log)
+	firstDisagreeIdx := -1
+	startOfComparison := args.PrevLogIndex + 1
+	newLogLen := startOfComparison + len(args.Entries)
+	for i := startOfComparison; i < min(selfLogLen, newLogLen); i++ {
+		if rf.log[i].TermReceived != args.Entries[i - startOfComparison].TermReceived {
+			firstDisagreeIdx = i
+			break
+		}
+	}
+	if (firstDisagreeIdx != -1) {
+		rf.log = rf.log[:firstDisagreeIdx]
+	}
+	selfLogLen = len(rf.log)
+	if (selfLogLen < newLogLen) {
+		rf.log = append(rf.log, args.Entries[selfLogLen - args.PrevLogIndex - 1:]...)
+	}
 }
 
 func (rf *Raft) electionTimeoutRoutine() {
@@ -664,11 +686,14 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 		DPrintf("Raft # %d rpc.reply.Term %d", rf.me, rpc.reply.Term)
 		if rpc.reply.Success {
 			// successfully appended entries on this peer, update internal storage
-			remoteLen := len(rpc.args.Entries)
-			rf.nextIndex[rpc.peerIndex] = rpc.args.PrevLogIndex + remoteLen + 1
+			// remoteLen := len(rpc.args.Entries)
+			// rf.nextIndex[rpc.peerIndex] = rpc.args.PrevLogIndex + remoteLen + 1
+			// ^^^ THIS IS NOT CORRECT, SHOULD BE MONOTONICALLY INCREASING
+			rf.nextIndex[rpc.peerIndex] = rpc.reply.NextIndex
 			DPrintf("Raft # %d rf.nextIndex[%d] : %d", rf.me, rpc.peerIndex, rf.nextIndex[rpc.peerIndex])
 			rf.matchIndex[rpc.peerIndex] = rf.nextIndex[rpc.peerIndex] - 1
-			if remoteLen-1 > rf.commitIndex {
+			// if remoteLen-1 > rf.commitIndex { // THIS IS NOT CORRECT, remoteLen can be small like 0 1
+			if rf.matchIndex[rpc.peerIndex] > rf.commitIndex {
 				// see if commit possible
 				go rf.updateLeaderCommitIndex()
 			}
