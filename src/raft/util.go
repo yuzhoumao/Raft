@@ -7,7 +7,7 @@ import (
 )
 
 // Debugging
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -39,7 +39,7 @@ const (
 )
 
 func getElectionSleepDuration() time.Duration {
-	return (time.Duration(600+rand.Float64()) * (400)) * time.Millisecond
+	return time.Duration(300+600*rand.Float64()) * time.Millisecond
 	// random election timeout between 0.6 and 1s
 }
 

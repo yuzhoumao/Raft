@@ -19,7 +19,6 @@ package raft
 
 import (
 	"labrpc"
-	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -222,12 +221,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, replyChan chan<- *RequestVoteReply) {
+	DPrintf("Raft # %d in function sendRequestVote()", rf.me)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	for !ok {
 		// resend?
 		return
 	}
 	replyChan <- reply
+	DPrintf("Raft # %d returning from function sendRequestVote()", rf.me)
 	return
 }
 
@@ -246,6 +247,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	DPrintf("Raft # %d in function Start()", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.currentState != leader {
@@ -279,12 +281,12 @@ func (rf *Raft) Kill() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	DPrintf("Raft # %d called rf.Make", rf.me)
 	rf.applyCh = applyCh
 
 	rf.currentTerm = 0
@@ -312,6 +314,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
+		DPrintf("Raft # %d rf.nextIndex[%d]: %d", rf.me, i, len(rf.log))
 		rf.matchIndex[i] = 0
 	}
 
@@ -320,14 +323,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start main routine
 	go rf.Main()
 	// end of Raft server instantiation
+	DPrintf("Raft # %d started rf.Main() routine", rf.me)
 	return rf
 }
 
 // Main
 func (rf *Raft) Main() {
-	rand.Seed(666)
+	DPrintf("Raft # %d in function Main()", rf.me)
 	go rf.electionTimeoutRoutine()
 	go rf.respondAppendEntriesRoutine()
+	DPrintf("Raft # %d entering applyMsg loop in Main()", rf.me)
 	for {
 		rf.mu.Lock()
 		if rf.commitIndex > rf.lastApplied {
@@ -341,6 +346,7 @@ func (rf *Raft) Main() {
 }
 
 func (rf *Raft) respondAppendEntriesRoutine() {
+	DPrintf("Raft # %d in function respondAppendEntriesRoutine()", rf.me)
 	for {
 		rpc := <-rf.rawAppendEntriesRPCRequest
 		rf.respondAppendEntriesRoutineHelper(rpc)
@@ -349,8 +355,10 @@ func (rf *Raft) respondAppendEntriesRoutine() {
 }
 
 func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
+	DPrintf("Raft # %d in function respondAppendEntriesRoutineHelper()", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf("Raft # %d processing one AE request", rf.me)
 	if rpc.args.Term < rf.currentTerm { // the server sending this RPC thinks it is the leader,
 		// while it is actually not
 		// this may occur when a broken internet connection suddenly comes live
@@ -358,21 +366,23 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 
 		rpc.reply.Success = false
 		return
-	}
-	if rpc.args.Term >= rf.currentTerm {
+	} else {
 		rf.currentTerm = rpc.args.Term
 		rpc.reply.Term = rpc.args.Term
 		rf.currentState = follower // receiver side conversion
-		rf.electionTimerResetted = true
+		DPrintf("Raft # %d converting to follower in Helper()", rf.me)
 		// All Servers: if RPC response contain term > currentTerm
 		// convert to follower
 	}
+	rf.electionTimerResetted = true
+	DPrintf("Raft # %d rpc.args.PrevLogIndex %d len(rf.log) %d", rf.me, rpc.args.PrevLogIndex, len(rf.log))
 	if rpc.args.PrevLogIndex > len(rf.log)-1 { // len(rf.log) - 1 is the last index in log
 		rpc.reply.Success = false
 		rpc.reply.ConflictTerm = 0 // force leader to check len(rf.log) - 1 in next RPC
 		rpc.reply.StartOfConflictTerm = len(rf.log)
 		return
 	}
+	DPrintf("Raft # %d rpc.args.PrevLogTerm %d rf.log[rpc.args.PrevLogIndex].TermReceived %d", rf.me, rpc.args.PrevLogTerm, rf.log[rpc.args.PrevLogIndex].TermReceived)
 	if rpc.args.PrevLogTerm != rf.log[rpc.args.PrevLogIndex].TermReceived {
 		conflictIndex := rpc.args.PrevLogIndex
 		// does not contain an entry at prevLogIndex
@@ -384,42 +394,53 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 	}
 	// now that the PrevLog entry agrees, delete all entries in rf.log
 	// that does not agree with those in rpc.args.entries
-	rf.log = append(rf.log[0:rpc.args.PrevLogIndex+1], rpc.args.Entries[rpc.args.PrevLogIndex+1:]...)
+	DPrintf("Raft # %d appending after PrevLogIndex %d", rf.me, rpc.args.PrevLogIndex)
+	if len(rpc.args.Entries) > 0 {
+		rf.log = append(rf.log[0:rpc.args.PrevLogIndex+1], rpc.args.Entries...)
+	}
 	// now check if commit any entry
 	if rpc.args.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = min(rpc.args.LeaderCommitIndex, len(rf.log)-1)
 	}
 	rpc.reply.Success = true
+	DPrintf("Raft # %d returning from Helper()", rf.me)
 }
 
 func (rf *Raft) electionTimeoutRoutine() {
+	DPrintf("Raft # %d in function electionTimeoutRoutine()", rf.me)
 	for {
 		rf.mu.Lock()
 		if rf.electionTimerResetted || rf.currentState == leader {
 			rf.electionTimerResetted = false
+			DPrintf("Raft # %d believes it is LEADER: %t", rf.me, rf.currentState == leader)
 			rf.mu.Unlock()
-			time.Sleep(getElectionSleepDuration())
+			sleepTime := getElectionSleepDuration()
+			DPrintf("Raft # %d sleeping for %s", rf.me, sleepTime)
+			time.Sleep(sleepTime)
 		} else {
 			// timed out while not being a leader
 			// convert to candidate if still a follower
 			if rf.currentState == follower {
 				// convert to candidate
+				DPrintf("Raft # %d had election timed out and converting to candidate", rf.me)
 				rf.currentState = candidate
 			}
 			// if election Timeout elapse, start a new election
 			if rf.currentState == candidate {
 				rf.electionTimerResetted = true
 				rf.currentTerm++
+				DPrintf("Raft server # %d kicks off an election", rf.me)
 				go rf.kickOffElection()
 			}
+			rf.mu.Unlock()
 		}
-		rf.mu.Unlock()
 	}
 }
 
 // kickOffElection should constantly check currentElection and return once < currentElection
 // it should also check currentState and return once follower
 func (rf *Raft) kickOffElection() {
+	DPrintf("Raft # %d in function kickOffElection()", rf.me)
 	// send out requestVote RPCs
 	replyChan := make(chan *RequestVoteReply)
 	args := RequestVoteArgs{}
@@ -434,6 +455,7 @@ func (rf *Raft) kickOffElection() {
 		reply := RequestVoteReply{}
 		if i != rf.me {
 			go rf.sendRequestVote(i, &args, &reply, replyChan)
+			DPrintf("Raft # %d sent RequestVote to Peer # %d", rf.me, i)
 			// if the RPC times out, the go routine will return false
 			// should the RequestVote RPC be sent again?
 		}
@@ -441,15 +463,18 @@ func (rf *Raft) kickOffElection() {
 	for { // request vote response handler
 		reply := <-replyChan
 		rf.mu.Lock()
+		DPrintf("Raft # %d got RequestVote reply from Peer", rf.me)
 		if rf.currentTerm > args.Term {
 			// already timed out and kick started a new election
 			rf.mu.Unlock()
 			return
 		}
 		if reply.VoteGranted {
+			DPrintf("Vote granted for Raft # %d", rf.me)
 			currentVoteCounter++
 			if currentVoteCounter > rf.majorityNeed {
 				// elected leader
+				DPrintf("Raft # %d received enough votes and converted to leader", rf.me)
 				rf.currentState = leader
 				go rf.leaderRoutine()
 				rf.mu.Unlock()
@@ -473,6 +498,7 @@ func (rf *Raft) kickOffElection() {
 }
 
 func (rf *Raft) leaderRoutine() {
+	DPrintf("Raft # %d in function leaderRoutine()", rf.me)
 	replyChan := make(chan *AppendEntriesRPC)
 	go rf.appendEntriesSenderHandleResponse(replyChan)
 	go rf.sendHeartbeatRoutine(replyChan) // this handles all heartbeats
@@ -502,14 +528,18 @@ func (rf *Raft) leaderRoutine() {
 }
 
 func (rf *Raft) sendRealAppendEntries(peerIndex int, replyChan chan *AppendEntriesRPC) {
+	DPrintf("Raft # %d in function sendRealAppendEntries()", rf.me)
 	// only start if in leader state, should stop if converts to follower
 	// should be accompanied by a timer for every server
 	args, replyBefore := AppendEntriesArgs{}, AppendEntriesReply{}
 	rf.mu.Lock()
 	args.Term = rf.currentTerm
+	DPrintf("LEADER Raft # %d in term %d", rf.me, args.Term)
 	args.LeaderId = rf.me
 	args.PrevLogIndex = rf.nextIndex[peerIndex] - 1
+	DPrintf("LEADER Raft # %d rpc PrevLogIndex %d", rf.me, args.PrevLogIndex)
 	args.PrevLogTerm = rf.log[args.PrevLogIndex].TermReceived
+	DPrintf("LEADER Raft # %d rpc PrevLogTerm %d", rf.me, args.PrevLogTerm)
 	args.Entries = rf.log[args.PrevLogIndex+1:]
 	args.LeaderCommitIndex = rf.commitIndex
 	rf.mu.Unlock()
@@ -517,12 +547,14 @@ func (rf *Raft) sendRealAppendEntries(peerIndex int, replyChan chan *AppendEntri
 }
 
 func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
+	DPrintf("Raft # %d in function sendHeartbeatRoutine()", rf.me)
 	for {
 		rf.mu.Lock()
 		if rf.currentState != leader {
 			rf.mu.Unlock()
 			return
 		}
+		rf.mu.Unlock()
 		args := AppendEntriesArgs{}
 		for i := range rf.peers {
 			reply := AppendEntriesReply{}
@@ -530,30 +562,38 @@ func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
 				go rf.sendAppendEntriesBoth(i, &args, &reply, replyChan)
 			}
 		}
+		DPrintf("Raft # %d sent out heart beats and going to sleep", rf.me)
 		time.Sleep(getHeartbeatSleepDuration())
 	}
 }
 
 func (rf *Raft) sendAppendEntriesBoth(peerIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply, replyChan chan *AppendEntriesRPC) {
-	ok := rf.peers[peerIndex].Call("Raft.appendEntriesReceiverHandler", args, reply)
+	DPrintf("Raft # %d in function sendAppendEntriesBoth()", rf.me)
+	ok := rf.peers[peerIndex].Call("Raft.AppendEntriesReceiverHandler", args, reply)
 	for !ok {
 		// resend?
+		DPrintf("Raft # %d returning from function sendAppendEntriesBoth()", rf.me)
 		return
 	}
 	replyChan <- &AppendEntriesRPC{args, reply, peerIndex}
 	// only leaders will send heartbeats and only leaders have to handle AERPC responses
+	DPrintf("Raft # %d returning from function sendAppendEntriesBoth()", rf.me)
 	return
 }
 
 // ReceiverHandler takes the reply and sends into the channel
 // which is actively listened by respondAppendEntriesRoutine
-func (rf *Raft) appendEntriesReceiverHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) AppendEntriesReceiverHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// receiver side
 	// hand over the RPC to in channel and it will be handled by the routine
+	DPrintf("Raft # %d in function AppendEntriesReceiverHandler()", rf.me)
 	rf.rawAppendEntriesRPCRequest <- &AppendEntriesRPC{args, reply, rf.me}
+	rpc := <-rf.handledAppendEntriesRPCRequest
+	reply = rpc.reply
 }
 
 func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesRPC) {
+	DPrintf("Raft # %d in function appendEntriesSenderHandleResponse()", rf.me)
 	for {
 		rpc := <-replyChan
 		rf.mu.Lock()
@@ -569,10 +609,12 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 			rf.mu.Unlock()
 			return
 		}
+		DPrintf("Raft # %d rpc.reply.Success %t", rf.me, rpc.reply.Success)
 		if rpc.reply.Success {
 			// successfully appended entries on this peer, update internal storage
 			remoteLen := len(rpc.args.Entries)
-			rf.nextIndex[rpc.peerIndex] = remoteLen
+			rf.nextIndex[rpc.peerIndex] = rpc.args.PrevLogIndex + remoteLen
+			DPrintf("Raft # %d rf.nextIndex[%d] : %d", rf.me, rpc.peerIndex, rf.nextIndex[rpc.peerIndex])
 			rf.matchIndex[rpc.peerIndex] = remoteLen - 1
 			if remoteLen-1 > rf.commitIndex {
 				// see if commit possible
@@ -581,13 +623,15 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 		} else {
 			// prevLogIndex empty or does not match
 			rf.nextIndex[rpc.peerIndex] = rpc.reply.StartOfConflictTerm - 1 // skip those in between
-			go rf.sendRealAppendEntries(rpc.peerIndex, replyChan)           // retry
+			DPrintf("Raft # %d rf.nextIndex[%d] : %d", rf.me, rpc.peerIndex, rf.nextIndex[rpc.peerIndex])
+			go rf.sendRealAppendEntries(rpc.peerIndex, replyChan) // retry
 		}
 		rf.mu.Unlock() // should not hold the lock while reading from any channel, in this case replyChan
 	}
 }
 
 func (rf *Raft) updateLeaderCommitIndex() {
+	DPrintf("Raft # %d in function updateLeaderCommitIndex()", rf.me)
 	rf.mu.Lock()
 	matchIndex := append(make([]int, 0), rf.matchIndex...)
 	rf.mu.Unlock()
