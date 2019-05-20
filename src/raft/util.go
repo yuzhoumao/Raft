@@ -2,6 +2,7 @@ package raft
 
 import (
 	"log"
+	"math/rand"
 	"time"
 )
 
@@ -38,13 +39,12 @@ const (
 )
 
 func getElectionSleepDuration() time.Duration {
-	return time.Duration(200) * time.Millisecond
-	// r := rand.New(rand.NewSource(666))
-	// time.Duration(r.Intn(1)) * time.Microsecond * 100
+	return (time.Duration(600+rand.Float64()) * (400)) * time.Millisecond
+	// random election timeout between 0.6 and 1s
 }
 
 func getHeartbeatSleepDuration() time.Duration {
-	return time.Duration(200) * time.Millisecond
+	return time.Duration(100) * time.Millisecond // limited to at most 10 hbs per second, so have to sleep >= 0.1s
 	// this should be just a constant period
 }
 

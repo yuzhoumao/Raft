@@ -19,6 +19,7 @@ package raft
 
 import (
 	"labrpc"
+	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -324,6 +325,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // Main
 func (rf *Raft) Main() {
+	rand.Seed(666)
 	go rf.electionTimeoutRoutine()
 	go rf.respondAppendEntriesRoutine()
 	for {
