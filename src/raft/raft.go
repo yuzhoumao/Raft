@@ -630,9 +630,9 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 		if rpc.reply.Success {
 			// successfully appended entries on this peer, update internal storage
 			remoteLen := len(rpc.args.Entries)
-			rf.nextIndex[rpc.peerIndex] = rpc.args.PrevLogIndex + remoteLen
+			rf.nextIndex[rpc.peerIndex] = rpc.args.PrevLogIndex + remoteLen + 1
 			DPrintf("Raft # %d rf.nextIndex[%d] : %d", rf.me, rpc.peerIndex, rf.nextIndex[rpc.peerIndex])
-			rf.matchIndex[rpc.peerIndex] = remoteLen - 1
+			rf.matchIndex[rpc.peerIndex] = rf.nextIndex[rpc.peerIndex] - 1
 			if remoteLen-1 > rf.commitIndex {
 				// see if commit possible
 				go rf.updateLeaderCommitIndex()
