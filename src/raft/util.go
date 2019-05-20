@@ -40,7 +40,7 @@ const (
 )
 
 func getElectionSleepDuration() time.Duration {
-	return time.Duration(300+600*rand.Float64()) * time.Millisecond
+	return time.Duration(200+1000*rand.Float64()) * time.Millisecond
 	// random election timeout between 0.6 and 1s
 }
 
