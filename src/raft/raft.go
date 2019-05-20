@@ -87,6 +87,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 	currentTerm                    int
 	votedFor                       int // used in voting decision
+	lastVotedTerm				   int
 	log                            []*LogEntry
 	commitIndex                    int
 	lastApplied                    int
@@ -178,17 +179,24 @@ type RequestVoteReplyWrapper struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	DPrintf("RequestVote() receiver Raft %+v", rf)
+	defer DPrintf("RequestVote() receiver Raft %+v", args)
+	defer DPrintf("RequestVote() receiver Raft %+v", reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("RequestVote() args.Term %d", args.Term)
-	DPrintf("RequestVote() rf.currentTerm %d", rf.currentTerm)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
+	// args.Term >= rf.currentTerm
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.currentState = follower // all server rule: convert to follower
+		rf.votedFor = -1 // reset votedFor
+	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(rf.currentTerm < args.LastLogTerm || (rf.currentTerm == args.LastLogTerm && rf.commitIndex <= args.LastLogIndex)) {
+		(rf.log[len(rf.log)-1].TermReceived < args.LastLogTerm || (rf.log[len(rf.log)-1].TermReceived == args.LastLogTerm && rf.commitIndex <= args.LastLogIndex)) {
 		// at least as uptodate
 		reply.Term = args.Term
 		reply.VoteGranted = true
@@ -275,6 +283,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.mu.Lock()
+	rf.currentState = killed
+	rf.mu.Unlock()
 }
 
 //
@@ -297,6 +308,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
+	rf.lastVotedTerm = 0
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
@@ -338,6 +350,9 @@ func (rf *Raft) Main() {
 	go rf.respondAppendEntriesRoutine()
 	DPrintf("Raft # %d entering applyMsg loop in Main()", rf.me)
 	for {
+		if rf.currentState == killed {
+			return
+		}
 		rf.mu.Lock()
 		if rf.commitIndex > rf.lastApplied {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
@@ -352,6 +367,9 @@ func (rf *Raft) Main() {
 func (rf *Raft) respondAppendEntriesRoutine() {
 	DPrintf("Raft # %d in function respondAppendEntriesRoutine()", rf.me)
 	for {
+		if rf.currentState == killed {
+			return
+		}
 		rpc := <-rf.rawAppendEntriesRPCRequest
 		rf.respondAppendEntriesRoutineHelper(rpc)
 		rf.handledAppendEntriesRPCRequest <- rpc
@@ -370,11 +388,12 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 
 		rpc.reply.Success = false
 		return
-	} else {
+	} else if (rpc.args.Term > rf.currentTerm) {
 		rf.currentTerm = rpc.args.Term
 		rpc.reply.Term = rpc.args.Term
 		DPrintf("rf.currentTerm %d, rpc.args.Term %d, rpc.reply.Term %d", rf.currentTerm, rpc.args.Term, rpc.reply.Term)
 		rf.currentState = follower // receiver side conversion
+		rf.votedFor = -1 // reset vote
 		DPrintf("Raft # %d converting to follower in Helper()", rf.me)
 		// All Servers: if RPC response contain term > currentTerm
 		// convert to follower
@@ -415,9 +434,14 @@ func (rf *Raft) electionTimeoutRoutine() {
 	DPrintf("Raft # %d in function electionTimeoutRoutine()", rf.me)
 	for {
 		rf.mu.Lock()
+		DPrintf("Raft # %d electionTimerResetted: %t", rf.me, rf.electionTimerResetted)
+		DPrintf("Raft # %d believes it is LEADER: %t, electionTimeoutRoutine()", rf.me, rf.currentState == leader)
+		if rf.currentState == killed {
+			rf.mu.Unlock()
+			return
+		}
 		if rf.electionTimerResetted || rf.currentState == leader {
 			rf.electionTimerResetted = false
-			DPrintf("Raft # %d believes it is LEADER: %t", rf.me, rf.currentState == leader)
 			rf.mu.Unlock()
 			sleepTime := getElectionSleepDuration()
 			DPrintf("Raft # %d sleeping for %s", rf.me, sleepTime)
@@ -479,7 +503,7 @@ func (rf *Raft) kickOffElection() {
 		DPrintf("Raft # %d is in term # %d", rf.me, rf.currentTerm)
 		if reply.VoteGranted && reply.Term == rf.currentTerm {
 			currentVoteCounter++
-			if currentVoteCounter > rf.majorityNeed {
+			if currentVoteCounter >= rf.majorityNeed {
 				// elected leader
 				DPrintf("Raft # %d received enough votes and converted to leader", rf.me)
 				rf.currentState = leader
@@ -493,6 +517,7 @@ func (rf *Raft) kickOffElection() {
 			if rf.currentTerm < reply.Term {
 				rf.currentTerm = reply.Term
 				rf.currentState = follower // voting conversion
+				rf.votedFor = -1
 				rf.electionTimerResetted = true
 				// All Servers: if RPC response contain term > currentTerm
 				// convert to follower
@@ -557,7 +582,7 @@ func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
 	DPrintf("Raft # %d in function sendHeartbeatRoutine()", rf.me)
 	for {
 		rf.mu.Lock()
-		DPrintf("Raft # %d believes it is LEADER: %t", rf.me, rf.currentState == leader)
+		DPrintf("Raft # %d believes it is LEADER: %t, sendHeartbeatRoutine()", rf.me, rf.currentState == leader)
 		if rf.currentState != leader {
 			rf.mu.Unlock()
 			return
@@ -588,7 +613,7 @@ func (rf *Raft) sendAppendEntriesBoth(peerIndex int, args *AppendEntriesArgs, re
 	ok := rf.peers[peerIndex].Call("Raft.AppendEntriesReceiverHandler", args, reply)
 	for !ok {
 		// resend?
-		DPrintf("Raft # %d returning from function sendAppendEntriesBoth()", rf.me)
+		DPrintf("Raft # %d packet dropped", rf.me)
 		return
 	}
 	replyChan <- &AppendEntriesRPC{args, reply, peerIndex}
@@ -621,6 +646,7 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 			// rf is a dated leader
 			rf.currentTerm = rpc.reply.Term
 			rf.currentState = follower // sender side conversion
+			rf.votedFor = -1
 			rf.electionTimerResetted = true
 			rf.mu.Unlock()
 			return
