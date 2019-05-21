@@ -331,13 +331,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.rawAppendEntriesRPCRequest = make(chan *AppendEntriesRPC)
 	rf.handledAppendEntriesRPCRequest = make(chan *AppendEntriesRPC)
 
-	rf.nextIndex = make([]int, len(rf.peers))
-	rf.matchIndex = make([]int, len(rf.peers))
-	for i := range rf.peers {
-		rf.nextIndex[i] = len(rf.log)
-		rf.matchIndex[i] = 0
-	}
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	// start main routine
@@ -361,6 +354,7 @@ func (rf *Raft) Main() {
 		if rf.commitIndex > rf.lastApplied {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				rf.applyCh <- ApplyMsg{true, rf.log[i].Command, i}
+				DPrintf("Raft # %d committing index %d with command %v", rf.me, i, rf.log[i].Command)
 			}
 			rf.lastApplied = rf.commitIndex
 		}
@@ -393,6 +387,7 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 		rpc.reply.Term = rf.currentTerm // the fake leader shall convert to follower after receiving
 
 		rpc.reply.Success = false
+		DPrintf("Raft %d is a dated leader in term %d", rpc.args.Term, rpc.args.LeaderId)
 		return
 	} else if rpc.args.Term > rf.currentTerm {
 		rf.currentTerm = rpc.args.Term
@@ -424,17 +419,13 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 	DPrintf("AE request is now %+v", rpc.args)
 	// now that the PrevLog entry agrees, delete all entries in rf.log
 	// that does not agree with those in rpc.args.entries
-	rf.mergeEntries(rpc.args)
-	rpc.reply.NextIndex = len(rf.log)
+	rf.mergeEntries(rpc.args, rpc.reply)
 	// now check if commit any entry
-	if rpc.args.LeaderCommitIndex > rf.commitIndex {
-		rf.commitIndex = min(rpc.args.LeaderCommitIndex, len(rf.log)-1)
-	}
 	rpc.reply.Success = true
 	DPrintf("Raft # %d returning from Helper()", rf.me)
 }
 
-func (rf *Raft) mergeEntries(args *AppendEntriesArgs) {
+func (rf *Raft) mergeEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// should work in case of hb msg
 	selfLogLen := len(rf.log)
 	firstDisagreeIdx := -1
@@ -452,6 +443,10 @@ func (rf *Raft) mergeEntries(args *AppendEntriesArgs) {
 	selfLogLen = len(rf.log)
 	if selfLogLen < newLogLen {
 		rf.log = append(rf.log, args.Entries[selfLogLen-args.PrevLogIndex-1:]...)
+	}
+	reply.NextIndex = min(len(rf.log), newLogLen)
+	if args.LeaderCommitIndex > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommitIndex, newLogLen-1)
 	}
 }
 
@@ -527,10 +522,16 @@ func (rf *Raft) kickOffElection() {
 		DPrintf("Raft # %d is in term # %d", rf.me, rf.currentTerm)
 		if reply.VoteGranted && reply.Term == rf.currentTerm {
 			currentVoteCounter++
-			if currentVoteCounter >= rf.majorityNeed {
+			if currentVoteCounter >= rf.majorityNeed && rf.currentState == candidate {
 				// elected leader
 				DPrintf("Raft # %d received enough votes and converted to leader", rf.me)
 				rf.currentState = leader
+				rf.nextIndex = make([]int, len(rf.peers))
+				rf.matchIndex = make([]int, len(rf.peers))
+				for i := range rf.peers {
+					rf.nextIndex[i] = len(rf.log)
+					rf.matchIndex[i] = 0
+				}
 				go rf.leaderRoutine()
 				rf.mu.Unlock()
 				return
@@ -620,12 +621,12 @@ func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
 		args.LeaderId = rf.me
 		args.LeaderCommitIndex = rf.commitIndex
 		for i := range rf.peers {
-			args.PrevLogIndex = rf.nextIndex[i] - 1
-			DPrintf("LEADER Raft # %d rpc PrevLogIndex %d", rf.me, args.PrevLogIndex)
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].TermReceived
-			DPrintf("LEADER Raft # %d rpc PrevLogTerm %d", rf.me, args.PrevLogTerm)
-			reply := AppendEntriesReply{}
 			if i != rf.me {
+				args.PrevLogIndex = rf.nextIndex[i] - 1
+				DPrintf("LEADER Raft # %d rpc PrevLogIndex %d", rf.me, args.PrevLogIndex)
+				args.PrevLogTerm = rf.log[args.PrevLogIndex].TermReceived
+				DPrintf("LEADER Raft # %d rpc PrevLogTerm %d", rf.me, args.PrevLogTerm)
+				reply := AppendEntriesReply{}
 				go rf.sendAppendEntriesBoth(i, &args, &reply, replyChan)
 			}
 		}
@@ -698,8 +699,9 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 			}
 		} else {
 			// prevLogIndex empty or does not match
-			rf.nextIndex[rpc.peerIndex] = rpc.reply.StartOfConflictTerm - 1 // skip those in between
+			rf.nextIndex[rpc.peerIndex] = rpc.reply.StartOfConflictTerm // skip those in between
 			DPrintf("Raft # %d rf.nextIndex[%d] : %d", rf.me, rpc.peerIndex, rf.nextIndex[rpc.peerIndex])
+			DPrintf("Raft # %d StartOfConflictTerm : %d", rf.me, rpc.reply.StartOfConflictTerm)
 			go rf.sendRealAppendEntries(rpc.peerIndex, replyChan) // retry
 		}
 		rf.mu.Unlock() // should not hold the lock while reading from any channel, in this case replyChan

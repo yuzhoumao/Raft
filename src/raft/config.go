@@ -173,6 +173,7 @@ func (cfg *config) start1(i int) {
 			} else if v, ok := (m.Command).(int); ok {
 				cfg.mu.Lock()
 				for j := 0; j < len(cfg.logs); j++ {
+					fmt.Printf("%+v\n", cfg.logs[j])
 					if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 						// some server has already committed a different value for this entry!
 						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
@@ -236,8 +237,8 @@ func (cfg *config) connect(i int) {
 	// fmt.Printf("connect(%d)\n", i)
 
 	cfg.connected[i] = true
-
-	// outgoing ClientEnds
+	fmt.Printf("Reconnected Raft # %d\n", i)
+	// outgoing ClientEnDs
 	for j := 0; j < cfg.n; j++ {
 		if cfg.connected[j] {
 			endname := cfg.endnames[i][j]
@@ -259,7 +260,7 @@ func (cfg *config) disconnect(i int) {
 	// fmt.Printf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false
-	DPrintf("Disconnected Raft # %d", i)
+	fmt.Printf("Disconnected Raft # %d\n", i)
 	// outgoing ClientEnds
 	for j := 0; j < cfg.n; j++ {
 		if cfg.endnames[i] != nil {
