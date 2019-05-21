@@ -387,7 +387,7 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 		rpc.reply.Term = rf.currentTerm // the fake leader shall convert to follower after receiving
 
 		rpc.reply.Success = false
-		DPrintf("Raft %d is a dated leader in term %d", rpc.args.Term, rpc.args.LeaderId)
+		DPrintf("Raft %d is a dated leader in term %d", rpc.args.LeaderId, rpc.args.Term)
 		return
 	} else if rpc.args.Term > rf.currentTerm {
 		rf.currentTerm = rpc.args.Term
@@ -438,10 +438,12 @@ func (rf *Raft) mergeEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 		}
 	}
 	if firstDisagreeIdx != -1 {
+		DPrintf("Raft # %d disagrees at index %d", rf.me, firstDisagreeIdx)
 		rf.log = rf.log[:firstDisagreeIdx]
 	}
 	selfLogLen = len(rf.log)
 	if selfLogLen < newLogLen {
+		DPrintf("Raft # %d appended %d new entries to its log", rf.me, newLogLen - selfLogLen)
 		rf.log = append(rf.log, args.Entries[selfLogLen-args.PrevLogIndex-1:]...)
 	}
 	reply.NextIndex = min(len(rf.log), newLogLen)
@@ -640,7 +642,11 @@ func (rf *Raft) sendAppendEntriesBoth(peerIndex int, args *AppendEntriesArgs, re
 	DPrintf("Raft # %d in function sendAppendEntriesBoth()", rf.me)
 	rf.mu.Lock()
 	ce := rf.peers[peerIndex]
+	cs := rf.currentState
 	rf.mu.Unlock()
+	if cs != leader {
+		return
+	}
 	ok := ce.Call("Raft.AppendEntriesReceiverHandler", args, reply)
 	for !ok {
 		// resend?
