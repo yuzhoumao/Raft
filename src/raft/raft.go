@@ -88,7 +88,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 	currentTerm                    int
 	votedFor                       int // used in voting decision
-	lastVotedTerm				   int
+	lastVotedTerm                  int
 	log                            []*LogEntry
 	commitIndex                    int
 	lastApplied                    int
@@ -191,7 +191,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.currentState = follower // all server rule: convert to follower
-		rf.votedFor = -1 // reset votedFor
+		rf.votedFor = -1           // reset votedFor
 	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
 		(rf.log[len(rf.log)-1].TermReceived < args.LastLogTerm || (rf.log[len(rf.log)-1].TermReceived == args.LastLogTerm && rf.commitIndex <= args.LastLogIndex)) {
@@ -394,18 +394,15 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 
 		rpc.reply.Success = false
 		return
-	} else if (rpc.args.Term > rf.currentTerm) {
+	} else if rpc.args.Term > rf.currentTerm {
 		rf.currentTerm = rpc.args.Term
 		rpc.reply.Term = rpc.args.Term
-		DPrintf("rf.currentTerm %d, rpc.args.Term %d, rpc.reply.Term %d", rf.currentTerm, rpc.args.Term, rpc.reply.Term)
 		rf.currentState = follower // receiver side conversion
-		rf.votedFor = -1 // reset vote
-		DPrintf("Raft # %d converting to follower in Helper()", rf.me)
+		rf.votedFor = -1           // reset vote
 		// All Servers: if RPC response contain term > currentTerm
 		// convert to follower
 	}
 	rf.electionTimerResetted = true
-	DPrintf("Raft # %d rpc.args.PrevLogIndex %d len(rf.log) %d", rf.me, rpc.args.PrevLogIndex, len(rf.log))
 	if rpc.args.PrevLogIndex > len(rf.log)-1 { // len(rf.log) - 1 is the last index in log
 		// tell leader to retry
 		rpc.reply.Success = false
@@ -413,7 +410,6 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 		rpc.reply.StartOfConflictTerm = len(rf.log)
 		return
 	}
-	DPrintf("Raft # %d rpc.args.PrevLogTerm %d rf.log[rpc.args.PrevLogIndex].TermReceived %d", rf.me, rpc.args.PrevLogTerm, rf.log[rpc.args.PrevLogIndex].TermReceived)
 	if rpc.args.PrevLogTerm != rf.log[rpc.args.PrevLogIndex].TermReceived {
 		// tell leader to retry
 		conflictIndex := rpc.args.PrevLogIndex
@@ -424,6 +420,8 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 		rpc.reply.StartOfConflictTerm = binarySearchFindFirst(rf.log, conflictIndex, conflictTerm)
 		return
 	}
+	DPrintf("Raft # %d is now %+v", rf.me, rf)
+	DPrintf("AE request is now %+v", rpc.args)
 	// now that the PrevLog entry agrees, delete all entries in rf.log
 	// that does not agree with those in rpc.args.entries
 	rf.mergeEntries(rpc.args)
@@ -443,17 +441,17 @@ func (rf *Raft) mergeEntries(args *AppendEntriesArgs) {
 	startOfComparison := args.PrevLogIndex + 1
 	newLogLen := startOfComparison + len(args.Entries)
 	for i := startOfComparison; i < min(selfLogLen, newLogLen); i++ {
-		if rf.log[i].TermReceived != args.Entries[i - startOfComparison].TermReceived {
+		if rf.log[i].TermReceived != args.Entries[i-startOfComparison].TermReceived {
 			firstDisagreeIdx = i
 			break
 		}
 	}
-	if (firstDisagreeIdx != -1) {
+	if firstDisagreeIdx != -1 {
 		rf.log = rf.log[:firstDisagreeIdx]
 	}
 	selfLogLen = len(rf.log)
-	if (selfLogLen < newLogLen) {
-		rf.log = append(rf.log, args.Entries[selfLogLen - args.PrevLogIndex - 1:]...)
+	if selfLogLen < newLogLen {
+		rf.log = append(rf.log, args.Entries[selfLogLen-args.PrevLogIndex-1:]...)
 	}
 }
 
@@ -572,7 +570,7 @@ func (rf *Raft) leaderRoutine() {
 				// send AE rpc with log entries starting at nextIndex
 				if rf.nextIndex[i] <= len(rf.log)-1 {
 					DPrintf("Raft # %d log length %d", rf.me, len(rf.log))
-					DPrintf("Raft # %d nextIndexd %d", i, rf.nextIndex[i] - 1)
+					DPrintf("Raft # %d nextIndexd %d", i, rf.nextIndex[i]-1)
 					go rf.sendRealAppendEntries(i, replyChan)
 				}
 				// if success update internal record
@@ -591,6 +589,7 @@ func (rf *Raft) sendRealAppendEntries(peerIndex int, replyChan chan *AppendEntri
 	DPrintf("Raft # %d in function sendRealAppendEntries()", rf.me)
 	// only start if in leader state, should stop if converts to follower
 	// should be accompanied by a timer for every server
+	DPrintf("Raft # %d is now %+v", rf.me, rf)
 	args, replyBefore := AppendEntriesArgs{}, AppendEntriesReply{}
 	rf.mu.Lock()
 	args.Term = rf.currentTerm
@@ -711,9 +710,13 @@ func (rf *Raft) updateLeaderCommitIndex() {
 	DPrintf("Raft # %d in function updateLeaderCommitIndex()", rf.me)
 	rf.mu.Lock()
 	matchIndex := append(make([]int, 0), rf.matchIndex...)
+	matchIndex[rf.me] = len(rf.log) - 1
+	DPrintf("Raft # %d matchIndex before sort : %v", rf.me, matchIndex)
 	rf.mu.Unlock()
 	sort.Sort(sort.IntSlice(matchIndex))
+	DPrintf("Raft # %d matchIndex after sort : %v", rf.me, matchIndex)
 	medianCommitIndex := matchIndex[rf.majorityNeed-1]
+	DPrintf("Raft # %d median index : %d", rf.me, medianCommitIndex)
 	rf.mu.Lock()
 	if medianCommitIndex > rf.commitIndex && rf.log[medianCommitIndex].TermReceived == rf.currentTerm {
 		rf.commitIndex = medianCommitIndex
