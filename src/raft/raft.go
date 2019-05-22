@@ -121,6 +121,7 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
+	// ENFORCE THAT RF.LOCK BE HELD BEFORE PERSIST()
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -153,9 +154,11 @@ func (rf *Raft) readPersist(data []byte) (int, error) {
 	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
 		return -1, errors.New("can't work with 42")
 	}
+	rf.mu.Lock()
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
 	rf.log = log
+	rf.mu.Unlock()
 	return 0, nil
 	// Your code here (2C).
 	// Example:
@@ -205,6 +208,7 @@ type RequestVoteReplyWrapper struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist() // defer is LIFO
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -295,6 +299,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	DPrintf("Raft # %d log length %d", rf.me, len(rf.log))
 	entry := LogEntry{command, rf.currentTerm}
 	rf.log = append(rf.log, &entry)
+	rf.persist()
 	// Your code here (2B).
 	DPrintf("Raft # %d accepted the command", rf.me)
 	DPrintf("Raft # %d log length %d", rf.me, len(rf.log))
@@ -404,6 +409,7 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 	DPrintf("Raft # %d in function respondAppendEntriesRoutineHelper()", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	DPrintf("Raft # %d processing one AE request", rf.me)
 	if rpc.args.Term < rf.currentTerm { // the server sending this RPC thinks it is the leader,
 		// while it is actually not
@@ -504,6 +510,7 @@ func (rf *Raft) electionTimeoutRoutine() {
 			if rf.currentState == candidate {
 				rf.electionTimerResetted = true
 				rf.currentTerm++
+				rf.persist()
 				DPrintf("Raft server # %d kicks off an election in term %d", rf.me, rf.currentTerm)
 				go rf.kickOffElection()
 			}
@@ -572,6 +579,7 @@ func (rf *Raft) kickOffElection() {
 				rf.electionTimerResetted = true
 				// All Servers: if RPC response contain term > currentTerm
 				// convert to follower
+				rf.persist()
 				rf.mu.Unlock()
 				return
 			}
@@ -709,6 +717,7 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 			rf.currentState = follower // sender side conversion
 			rf.votedFor = -1
 			rf.electionTimerResetted = true
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
