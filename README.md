@@ -44,6 +44,7 @@ The log entry with a given index will eventually be committed.
 At that point, Raft should send the log entry to the larger service for it to execute.
 
 ## A fault-tolerant key/value service on top of Raft
+The key-value service is structured as a replicated state machine with several key-value servers that coordinate their activities through the Raft log. The key/value service should continue to process client requests as long as a majority of the servers are alive and can communicate, in spite of other failures or network partitions.
 
 The service supports three operations: 
   - Put(key, value)
@@ -55,7 +56,7 @@ It maintains a simple database of key/value pairs.
   - Append(key, arg) appends arg to key's value (an Append to a non-existant key should act like Put)
   - Get() fetches the current value for a key
 
-Each client talks to the service through a Clerk with Put/Append/Get methods. A Clerk manages RPC interactions with the servers.
+Clients send Put(), Append(), and Get() RPCs to key/value servers (called kvraft servers), who then place those calls into the Raft log and execute them in order. A client can send an RPC to any of the kvraft servers, but if that server is not currently a Raft leader, or if there's a failure, the client should retry by sending to a different server. If the operation is committed to the Raft log (and hence applied to the key/value state machine), its result is reported to the client. If the operation failed to commit (for example, if the leader was replaced), the server reports an error, and the client retries with a different server.
 
 The service provides strong consistency to applications calls to the Clerk Get/Put/Append methods. Here's what we mean by strong consistency: 
 > If called one at a time, the Get/Put/Append methods should act as if the system had only one copy of its state, and each call should observe the modifications to the state implied by the preceding sequence of calls. 
