@@ -18,6 +18,10 @@ package raft
 //
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"labgob"
 	"labrpc"
 	"sort"
 	"sync"
@@ -117,6 +121,13 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 	// Your code here (2C).
 	// Example:
 	// w := new(bytes.Buffer)
@@ -130,10 +141,22 @@ func (rf *Raft) persist() {
 //
 // restore previously persisted state.
 //
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte) (int, error) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
+		return 0, nil
 	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []*LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		return -1, errors.New("can't work with 42")
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
+	return 0, nil
 	// Your code here (2C).
 	// Example:
 	// r := bytes.NewBuffer(data)
@@ -288,6 +311,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
 	rf.currentState = killed
+	fmt.Printf("Killed Raft # %d\n", rf.me)
 	rf.mu.Unlock()
 }
 
@@ -443,7 +467,7 @@ func (rf *Raft) mergeEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 	}
 	selfLogLen = len(rf.log)
 	if selfLogLen < newLogLen {
-		DPrintf("Raft # %d appended %d new entries to its log", rf.me, newLogLen - selfLogLen)
+		DPrintf("Raft # %d appended %d new entries to its log", rf.me, newLogLen-selfLogLen)
 		rf.log = append(rf.log, args.Entries[selfLogLen-args.PrevLogIndex-1:]...)
 	}
 	reply.NextIndex = min(len(rf.log), newLogLen)
