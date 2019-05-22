@@ -45,4 +45,25 @@ At that point, Raft should send the log entry to the larger service for it to ex
 
 ## A fault-tolerant key/value service on top of Raft
 
+The service supports three operations: 
+  - Put(key, value)
+  - Append(key, arg) 
+  - Get(key). 
+
+It maintains a simple database of key/value pairs. 
+  - Put() replaces the value for a particular key in the database
+  - Append(key, arg) appends arg to key's value (an Append to a non-existant key should act like Put)
+  - Get() fetches the current value for a key
+
+Each client talks to the service through a Clerk with Put/Append/Get methods. A Clerk manages RPC interactions with the servers.
+
+The service provides strong consistency to applications calls to the Clerk Get/Put/Append methods. Here's what we mean by strong consistency: 
+> If called one at a time, the Get/Put/Append methods should act as if the system had only one copy of its state, and each call should observe the modifications to the state implied by the preceding sequence of calls. 
+
+> For concurrent calls, the return values and final state must be the same as if the operations had executed one at a time in some order. Calls are concurrent if they overlap in time, for example if client X calls Clerk.Put(), then client Y calls Clerk.Append(), and then client X's call returns. 
+
+> Furthermore, a call must observe the effects of all calls that have completed before the call starts (so we are technically asking for linearizability).
+
+Strong consistency is convenient for applications because it means that, informally, all clients see the same state and they all see the latest state. Providing strong consistency is relatively easy for a single server. It is harder if the service is replicated, since all servers must choose the same execution order for concurrent requests, and must avoid replying to clients using state that isn't up to date. 
+
 ## Shard service over multiple replicated state machines
