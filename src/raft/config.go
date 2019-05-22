@@ -173,7 +173,7 @@ func (cfg *config) start1(i int) {
 			} else if v, ok := (m.Command).(int); ok {
 				cfg.mu.Lock()
 				for j := 0; j < len(cfg.logs); j++ {
-					fmt.Printf("%+v\n", cfg.logs[j])
+					// fmt.Printf("%+v\n", cfg.logs[j]fmt)
 					if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 						// some server has already committed a different value for this entry!
 						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
@@ -237,7 +237,7 @@ func (cfg *config) connect(i int) {
 	// fmt.Printf("connect(%d)\n", i)
 
 	cfg.connected[i] = true
-	fmt.Printf("Reconnected Raft # %d\n", i)
+	// fmt.Printf("Reconnected Raft # %d\n", i)
 	// outgoing ClientEnDs
 	for j := 0; j < cfg.n; j++ {
 		if cfg.connected[j] {
@@ -260,7 +260,7 @@ func (cfg *config) disconnect(i int) {
 	// fmt.Printf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false
-	fmt.Printf("Disconnected Raft # %d\n", i)
+	// fmt.Printf("Disconnected Raft # %d\n", i)
 	// outgoing ClientEnds
 	for j := 0; j < cfg.n; j++ {
 		if cfg.endnames[i] != nil {
@@ -380,6 +380,8 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 			cmd = cmd1
 		}
 	}
+	DPrintf("how many servers think a log entry is committed?")
+	DPrintf("count: %d, cmd: %v", count, cmd)
 	return count, cmd
 }
 
@@ -457,8 +459,10 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
+					DPrintf("committed")
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
 						// and it was the command we submitted.
+						DPrintf("it was the command we submitted")
 						return index
 					}
 				}
