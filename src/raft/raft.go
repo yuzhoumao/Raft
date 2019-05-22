@@ -477,6 +477,8 @@ func (rf *Raft) mergeEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 		rf.log = append(rf.log, args.Entries[selfLogLen-args.PrevLogIndex-1:]...)
 	}
 	reply.NextIndex = min(len(rf.log), newLogLen)
+	DPrintf("Raft # %d args.LeaderCommitIndex: %d", rf.me, args.LeaderCommitIndex)
+	DPrintf("Raft # %d newLogLen-1: %d", rf.me, newLogLen-1)
 	if args.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommitIndex, newLogLen-1)
 	}
@@ -649,13 +651,13 @@ func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
 			rf.mu.Unlock()
 			return
 		}
-		args := AppendEntriesArgs{}
-		args.Term = rf.currentTerm
-		DPrintf("LEADER Raft # %d in term %d", rf.me, args.Term)
-		args.LeaderId = rf.me
-		args.LeaderCommitIndex = rf.commitIndex
 		for i := range rf.peers {
 			if i != rf.me {
+				args := AppendEntriesArgs{}
+				args.Term = rf.currentTerm
+				DPrintf("LEADER Raft # %d in term %d", rf.me, args.Term)
+				args.LeaderId = rf.me
+				args.LeaderCommitIndex = rf.commitIndex
 				args.PrevLogIndex = rf.nextIndex[i] - 1
 				DPrintf("LEADER Raft # %d rpc PrevLogIndex %d", rf.me, args.PrevLogIndex)
 				args.PrevLogTerm = rf.log[args.PrevLogIndex].TermReceived
@@ -728,7 +730,8 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 			// remoteLen := len(rpc.args.Entries)
 			// rf.nextIndex[rpc.peerIndex] = rpc.args.PrevLogIndex + remoteLen + 1
 			// ^^^ THIS IS NOT CORRECT, SHOULD BE MONOTONICALLY INCREASING
-			rf.nextIndex[rpc.peerIndex] = rpc.reply.NextIndex
+			rf.nextIndex[rpc.peerIndex] = max(rpc.reply.NextIndex, rf.nextIndex[rpc.peerIndex]) // nextIndex should be monotonic
+			// network delay might cause the first processed and smaller nextIndex to arrive later
 			DPrintf("Raft # %d rf.nextIndex[%d] : %d", rf.me, rpc.peerIndex, rf.nextIndex[rpc.peerIndex])
 			rf.matchIndex[rpc.peerIndex] = rf.nextIndex[rpc.peerIndex] - 1
 			// if remoteLen-1 > rf.commitIndex { // THIS IS NOT CORRECT, remoteLen can be small like 0 1
