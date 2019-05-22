@@ -20,7 +20,6 @@ package raft
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"labgob"
 	"labrpc"
 	"sort"
@@ -221,7 +220,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1           // reset votedFor
 	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(rf.log[len(rf.log)-1].TermReceived < args.LastLogTerm || (rf.log[len(rf.log)-1].TermReceived == args.LastLogTerm && rf.commitIndex <= args.LastLogIndex)) {
+		(rf.log[len(rf.log)-1].TermReceived < args.LastLogTerm || (rf.log[len(rf.log)-1].TermReceived == args.LastLogTerm && len(rf.log) - 1 <= args.LastLogIndex)) {
 		// at least as uptodate
 		reply.Term = args.Term
 		reply.VoteGranted = true
@@ -316,7 +315,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
 	rf.currentState = killed
-	fmt.Printf("Killed Raft # %d\n", rf.me)
+	// fmt.Printf("Killed Raft # %d\n", rf.me)
 	rf.mu.Unlock()
 }
 
@@ -541,6 +540,7 @@ func (rf *Raft) kickOffElection() {
 		if i != rf.me {
 			go rf.sendRequestVote(i, &args, &reply, replyChan)
 			DPrintf("Raft # %d sent RequestVote to Peer # %d", rf.me, i)
+			DPrintf("Raft # %d sent RequestVote content: %v", rf.me, args)
 			// if the RPC times out, the go routine will return false
 			// should the RequestVote RPC be sent again?
 		}
