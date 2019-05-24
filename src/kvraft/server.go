@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"bytes"
 )
 
 const Debug = 0
@@ -38,15 +39,16 @@ type Op struct {
 
 type KVServer struct {
 	mu      sync.Mutex
+	cond    *sync.Cond
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
 
 	maxraftstate int // snapshot if log grows this big
 
-	clientLookup map[int64][]string
+	clientLookup map[int64]int
+	kvStorage map[string]string
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	op := Op{}
@@ -67,20 +69,63 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string) {
 	if !isLeader {
 		return true, "" 
 	}
-	if _, ok := kv.clientLookup[op.clientID]; !ok {
-		kv.clientLookup[op.clientID] = make([]string, 0)
-	}
-	lastSeqNumInTable := len(kv.clientLookup[op.clientID]) - 1
-	if lastSeqNumInTable >= op.seqNum {
-		// current request already exists in kv server's table
-		// return value for duplicate request directly
-		return false, kv.clientLookup[op.clientID][op.seqNum]
-	}
 	kv.mu.Lock()
-	kv.rf.Start(&op)
+	if _, ok := kv.clientLookup[op.clientID]; !ok {
+		kv.clientLookup[op.clientID] = -1
+	}
+	if kv.clientLookup[op.clientID] < op.seqNum {
+		// current request not in kv server's table
+		kv.rf.Start(op)
+		for {
+			if kv.clientLookup[op.clientID] >= op.seqNum {
+				// can return now	
+				break
+			} else {
+				kv.cond.Wait()
+			}
+		}
+	}
 	kv.mu.Unlock()
 	//kv.rf.Start()
 	return false, ""
+}
+
+func (kv *KVServer) listenApplyCh() {
+	for applyMsg := range(kv.applyCh) {
+		if applyMsg.CommandValid == false {
+			// ignore other types of ApplyMsg
+		} else {
+			// command valid
+			op, ok := applyMsg.Command.(Op)
+			if ok {
+				kv.mu.Lock()
+				if op.seqNum > kv.clientLookup[op.clientID] {
+					// not a duplicate request
+					if op.opt == opGet {
+						// don't need to do anything
+					} else if op.opt == opPut {
+						kv.kvStorage[op.key] = op.val
+					} else if op.opt == opAppend {
+						oldVal, kvReadok := kv.kvStorage[op.key]
+						if kvReadok {
+							var buffer bytes.Buffer
+							buffer.WriteString(oldVal)
+							buffer.WriteString(op.val)
+							kv.kvStorage[op.key] = buffer.String()
+						} else {
+							kv.kvStorage[op.key] = op.val
+						}
+					}
+					// correctly processed, now wake up sleeping
+					kv.clientLookup[op.clientID] = op.seqNum
+				} else {
+					// duplicate request
+				}
+			} else {
+				// command is not a Op struct
+			}
+		}
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -130,12 +175,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
+	kv.mu = sync.Mutex{}
+	kv.cond = sync.NewCond(&kv.mu)
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.clientLookup = make(map[int64]int)
+	kv.kvStorage = make(map[string]string)
 
+	go kv.listenApplyCh()
 	return kv
 }
