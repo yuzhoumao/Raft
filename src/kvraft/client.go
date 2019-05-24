@@ -49,30 +49,19 @@ func (ck *Clerk) Get(key string) string {
 	ck.seqNum++
 	
 	reply := GetReply{}
-	
-	ck.sendGetUntilReply(&args, &reply)
-	for reply.WrongLeader {
-		ck.sendGetUntilReply(&args, &reply)
+
+	ok := false
+	for {
+		ok = ck.servers[ck.currentLeaderIdx].Call("KVServer.Get", &args, &reply)
+		if (ok && !reply.WrongLeader && (reply.Err == OK || reply.Err == ErrNoKey)) {
+			break
+		}
+		ck.currentLeaderIdx = (ck.currentLeaderIdx + 1) % len(ck.servers)
+	}
+	if reply.Err == ErrNoKey {
+		return ""
 	}
 	return reply.Value
-}
-
-func (ck *Clerk) sendGetUntilReply(args *GetArgs, reply *GetReply) {
-	ok := ck.servers[ck.currentLeaderIdx].Call("KVServer.Get", &args, &reply)
-	for !ok {
-		// resend?
-		ck.currentLeaderIdx++
-		ok = ck.servers[ck.currentLeaderIdx].Call("KVServer.Get", &args, &reply)
-	}
-}
-
-func (ck *Clerk) sendPAUntilReply(args *PutAppendArgs, reply *PutAppendReply) {
-	ok := ck.servers[ck.currentLeaderIdx].Call("KVServer.PutAppend", args, reply)
-	for !ok {
-		// resend?
-		ck.currentLeaderIdx++
-		ok = ck.servers[ck.currentLeaderIdx].Call("KVServer.PutAppend", args, reply)
-	}
 }
 
 //
@@ -98,9 +87,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	
 	reply := PutAppendReply{}
 	
-	ck.sendPAUntilReply(&args, &reply)
-	for reply.WrongLeader {
-		ck.sendPAUntilReply(&args, &reply)
+	ok := false
+	for {
+		ok = ck.servers[ck.currentLeaderIdx].Call("KVServer.PutAppend", &args, &reply)
+		if (ok && !reply.WrongLeader && reply.Err == OK) {
+			break
+		}
+		ck.currentLeaderIdx = (ck.currentLeaderIdx + 1) % len(ck.servers)
 	}
 	return
 }
