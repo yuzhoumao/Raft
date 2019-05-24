@@ -7,6 +7,9 @@ import "math/big"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
+	currentLeaderIdx int
+	clientID int64
+	seqNum int
 	// You will have to modify this struct.
 }
 
@@ -20,6 +23,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.clientID = nrand()
 	// You'll have to add code here.
 	return ck
 }
@@ -37,9 +41,38 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	args := GetArgs{}
+	args.Key = key
+	
+	args.ClientID = ck.clientID
+	args.SeqNum = ck.seqNum
+	ck.seqNum++
+	
+	reply := GetReply{}
+	
+	ck.sendGetUntilReply(&args, &reply)
+	for reply.WrongLeader {
+		ck.sendGetUntilReply(&args, &reply)
+	}
+	return reply.Value
+}
 
-	// You will have to modify this function.
-	return ""
+func (ck *Clerk) sendGetUntilReply(args *GetArgs, reply *GetReply) {
+	ok := ck.servers[ck.currentLeaderIdx].Call("KVServer.Get", &args, &reply)
+	for !ok {
+		// resend?
+		ck.currentLeaderIdx++
+		ok = ck.servers[ck.currentLeaderIdx].Call("KVServer.Get", &args, &reply)
+	}
+}
+
+func (ck *Clerk) sendPAUntilReply(args *PutAppendArgs, reply *PutAppendReply) {
+	ok := ck.servers[ck.currentLeaderIdx].Call("KVServer.PutAppend", args, reply)
+	for !ok {
+		// resend?
+		ck.currentLeaderIdx++
+		ok = ck.servers[ck.currentLeaderIdx].Call("KVServer.PutAppend", args, reply)
+	}
 }
 
 //
@@ -53,7 +86,23 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := PutAppendArgs{}
+
+	args.Key = key
+	args.Value = value
+	args.Op = op
+	
+	args.ClientID = ck.clientID
+	args.SeqNum = ck.seqNum
+	ck.seqNum++
+	
+	reply := PutAppendReply{}
+	
+	ck.sendPAUntilReply(&args, &reply)
+	for reply.WrongLeader {
+		ck.sendPAUntilReply(&args, &reply)
+	}
+	return
 }
 
 func (ck *Clerk) Put(key string, value string) {
