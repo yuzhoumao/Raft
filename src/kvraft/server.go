@@ -31,7 +31,9 @@ type Op struct {
 	// otherwise RPC will break.
 	opt OpTypes
 	key string
-	val string 
+	val string
+	clientID int64
+	seqNum int
 }
 
 type KVServer struct {
@@ -42,35 +44,46 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	clientLookup map[int64][]string
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	op := Op{}
+	op.opt = opGet
+	op.key = args.Key
+	op.clientID = args.ClientID
+	op.seqNum = args.SeqNum
+	wrongLeader, value := kv.requestHandler(&op)
+	reply.WrongLeader = wrongLeader
+	reply.Value = value
+	//kv.rf.Start()
+}
+
+func (kv *KVServer) requestHandler(op *Op) (bool, string) {
 	kv.mu.Lock()
 	_, isLeader := kv.rf.GetState()
 	kv.mu.Unlock()
 	if !isLeader {
-		reply.WrongLeader = true
-		return
+		return true, "" 
 	}
-	op := Op{}
-	op.opt = opGet
-	op.key = args.Key
+	if _, ok := kv.clientLookup[op.clientID]; !ok {
+		kv.clientLookup[op.clientID] = make([]string, 0)
+	}
+	lastSeqNumInTable := len(kv.clientLookup[op.clientID]) - 1
+	if lastSeqNumInTable >= op.seqNum {
+		// current request already exists in kv server's table
+		// return value for duplicate request directly
+		return false, kv.clientLookup[op.clientID][op.seqNum]
+	}
 	kv.mu.Lock()
 	kv.rf.Start(&op)
 	kv.mu.Unlock()
 	//kv.rf.Start()
+	return false, ""
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
-	_, isLeader := kv.rf.GetState()
-	kv.mu.Unlock()
-	if !isLeader {
-		reply.WrongLeader = true
-		return
-	}
 	op := Op{}
 	if args.Op == "Put" {
 		op.opt = opPut
@@ -79,10 +92,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	op.key = args.Key
 	op.val = args.Value
-	kv.mu.Lock()
-	kv.rf.Start(&op)
-	kv.mu.Unlock()
-	//kv.rf.Start()
+	wrongLeader, _ := kv.requestHandler(&op)
+	reply.WrongLeader = wrongLeader
 }
 
 //
