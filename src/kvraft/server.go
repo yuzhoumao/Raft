@@ -17,11 +17,21 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type OpTypes int
+
+const (
+	opGet OpTypes = iota
+	opPut
+	opAppend
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	opt OpTypes
+	key string
+	val string 
 }
 
 type KVServer struct {
@@ -37,11 +47,42 @@ type KVServer struct {
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	kv.mu.Lock()
+	_, isLeader := kv.rf.GetState()
+	kv.mu.Unlock()
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	op := Op{}
+	op.opt = opGet
+	op.key = args.Key
+	kv.mu.Lock()
+	kv.rf.Start(&op)
+	kv.mu.Unlock()
+	//kv.rf.Start()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.mu.Lock()
+	_, isLeader := kv.rf.GetState()
+	kv.mu.Unlock()
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	op := Op{}
+	if args.Op == "Put" {
+		op.opt = opPut
+	} else if args.Op == "Append" {
+		op.opt = opAppend
+	}
+	op.key = args.Key
+	op.val = args.Value
+	kv.mu.Lock()
+	kv.rf.Start(&op)
+	kv.mu.Unlock()
+	//kv.rf.Start()
 }
 
 //
