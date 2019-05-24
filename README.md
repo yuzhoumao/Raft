@@ -52,7 +52,7 @@ The service supports three operations:
   - Get(key). 
 
 It maintains a simple database of key/value pairs. 
-  - Put() replaces the value for a particular key in the database
+  - Put(key, value) replaces the value for a particular key in the database
   - Append(key, arg) appends arg to key's value (an Append to a non-existant key should act like Put)
   - Get() fetches the current value for a key
 
