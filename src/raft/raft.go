@@ -20,6 +20,7 @@ package raft
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"labgob"
 	"labrpc"
 	"sort"
@@ -220,7 +221,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1           // reset votedFor
 	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(rf.log[len(rf.log)-1].TermReceived < args.LastLogTerm || (rf.log[len(rf.log)-1].TermReceived == args.LastLogTerm && len(rf.log) - 1 <= args.LastLogIndex)) {
+		(rf.log[len(rf.log)-1].TermReceived < args.LastLogTerm || (rf.log[len(rf.log)-1].TermReceived == args.LastLogTerm && len(rf.log)-1 <= args.LastLogIndex)) {
 		// at least as uptodate
 		reply.Term = args.Term
 		reply.VoteGranted = true
@@ -382,7 +383,7 @@ func (rf *Raft) Main() {
 		if rf.commitIndex > rf.lastApplied {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				rf.applyCh <- ApplyMsg{true, rf.log[i].Command, i}
-				DPrintf("Raft # %d committing index %d with command %v", rf.me, i, rf.log[i].Command)
+				fmt.Printf("Raft # %d committing index %d with command %v\n", rf.me, i, rf.log[i].Command)
 			}
 			rf.lastApplied = rf.commitIndex
 		}
