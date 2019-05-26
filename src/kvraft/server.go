@@ -1,12 +1,12 @@
 package raftkv
 
 import (
+	"bytes"
 	"labgob"
 	"labrpc"
 	"log"
 	"raft"
 	"sync"
-	"bytes"
 )
 
 const Debug = 0
@@ -30,24 +30,37 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	opt OpTypes
-	key string
-	val string
+	opt      OpTypes
+	key      string
+	val      string
 	clientID int64
-	seqNum int
+	seqNum   int
 }
 
 type KVServer struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
+	mu            sync.Mutex
+	cond          *sync.Cond
+	me            int
+	rf            *raft.Raft
+	applyCh       chan raft.ApplyMsg
+	currCommitIdx int
+	currOp        Op
+	maxraftstate  int // snapshot if log grows this big
 
-	maxraftstate int // snapshot if log grows this big
+	clientLookup      map[int64]*LatestRPCByClient
+	kvStorage         map[string]string
+	commitIndexNotify map[int]*CommitIndexCommunication
+}
 
-	clientLookup map[int64]int
-	kvStorage map[string]string
+type CommitIndexCommunication struct {
+	handlerFinishedWg sync.WaitGroup
+	indexUpdatedChan  chan bool
+}
+
+type LatestRPCByClient struct {
+	seqNum int
+	value  string
+	err    Err
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -56,42 +69,73 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	op.key = args.Key
 	op.clientID = args.ClientID
 	op.seqNum = args.SeqNum
-	wrongLeader, value := kv.requestHandler(&op)
+	wrongLeader, value, err := kv.requestHandler(&op)
 	reply.WrongLeader = wrongLeader
 	reply.Value = value
+	reply.Err = err
 	//kv.rf.Start()
 }
 
-func (kv *KVServer) requestHandler(op *Op) (bool, string) {
+func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
+	// kv.mu.Lock()
+	// _, isLeader := kv.rf.GetState()
+	// kv.mu.Unlock()
+	// if !isLeader {
+	// 	return true, ""
+	// }
+	// the above has been commented out because Start() will always check if
+	// the Raft server being contacted is the leader or not
 	kv.mu.Lock()
-	_, isLeader := kv.rf.GetState()
-	kv.mu.Unlock()
-	if !isLeader {
-		return true, "" 
-	}
-	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	if _, ok := kv.clientLookup[op.clientID]; !ok {
-		kv.clientLookup[op.clientID] = -1
+		// a new client, keep track of its seq #
+		lastestRPC := LatestRPCByClient{}
+		lastestRPC.seqNum = -1
+		kv.clientLookup[op.clientID] = &lastestRPC
 	}
-	if kv.clientLookup[op.clientID] < op.seqNum {
+	if kv.clientLookup[op.clientID].seqNum < op.seqNum {
 		// current request not in kv server's table
-		kv.rf.Start(op)
-		for {
-			if kv.clientLookup[op.clientID] >= op.seqNum {
-				// can return now	
-				break
-			} else {
-				kv.cond.Wait()
-			}
+		idxIfEverCommitted, _, isLeader := kv.rf.Start(op)
+		if !isLeader {
+			return true, "", "" // Raft believes it is not the leader
 		}
+		// Start returns fairly quickly
+		// Start might actually return telling the server that it is not the leader
+		if _, ok := kv.commitIndexNotify[idxIfEverCommitted]; !ok {
+			kv.commitIndexNotify[idxIfEverCommitted] = &CommitIndexCommunication{}
+		}
+		kv.commitIndexNotify[idxIfEverCommitted].handlerFinishedWg.Add(1)
+		kv.mu.Unlock()
+		// unlock here b/c agreement can take a while
+		<-kv.commitIndexNotify[idxIfEverCommitted].indexUpdatedChan // listen routine will close this channel when value arrives
+		kv.mu.Lock()                                                // ready to read values from kv storage
+		// read the value
+		if kv.currOp.clientID != op.clientID || kv.currOp.seqNum != op.seqNum {
+			// not my op at this commitIndex, error
+			return false, "", "Failed"
+		}
+		// it was my op
+		defer kv.commitIndexNotify[idxIfEverCommitted].handlerFinishedWg.Done()
+		// val, ok := kv.kvStorage[op.key] // should be fine which one handler reads from, kvstorage or latestRPC
+		// kv.commitIndexNotify[idxIfEverCommitted].handlerFinishedWg.Done()
+		// if op.opt == opGet {
+		// 	// check if the key exists
+		// 	if ok {
+		// 		return false, val
+		// 	}
+		// 	// no such key
+		// 	return false, ErrNoKey
+		// }
+		// // put or append
+		// return false, "" // done
 	}
-	kv.mu.Unlock()
-	//kv.rf.Start()
-	return false, ""
+	// kvServer has seen this request, and it has been executed (listen routine is responsible for updating clientLookup)
+	return false, kv.clientLookup[op.clientID].value, kv.clientLookup[op.clientID].err
+	// TODO: does a kvServer have to be leader to respond to duplicate requests?
 }
 
 func (kv *KVServer) listenApplyCh() {
-	for applyMsg := range(kv.applyCh) {
+	for applyMsg := range kv.applyCh {
 		if applyMsg.CommandValid == false {
 			// ignore other types of ApplyMsg
 		} else {
@@ -99,12 +143,24 @@ func (kv *KVServer) listenApplyCh() {
 			op, ok := applyMsg.Command.(Op)
 			if ok {
 				kv.mu.Lock()
-				if op.seqNum > kv.clientLookup[op.clientID] {
+				kv.currCommitIdx++
+				kv.currOp = op // allow handlers to check if the op is the same as what they submitted
+				if op.seqNum > kv.clientLookup[op.clientID].seqNum {
 					// not a duplicate request
+					kv.clientLookup[op.clientID].seqNum = op.seqNum
 					if op.opt == opGet {
-						// don't need to do anything
+						val, ok := kv.kvStorage[op.key]
+						if ok {
+							kv.clientLookup[op.clientID].value = val
+							kv.clientLookup[op.clientID].err = OK
+						} else {
+							kv.clientLookup[op.clientID].value = ""
+							kv.clientLookup[op.clientID].err = ErrNoKey
+						}
 					} else if op.opt == opPut {
 						kv.kvStorage[op.key] = op.val
+						kv.clientLookup[op.clientID].value = ""
+						kv.clientLookup[op.clientID].err = OK
 					} else if op.opt == opAppend {
 						oldVal, kvReadok := kv.kvStorage[op.key]
 						if kvReadok {
@@ -115,12 +171,19 @@ func (kv *KVServer) listenApplyCh() {
 						} else {
 							kv.kvStorage[op.key] = op.val
 						}
+						kv.clientLookup[op.clientID].value = ""
+						kv.clientLookup[op.clientID].err = OK
 					}
 					// correctly processed, now wake up sleeping
-					kv.clientLookup[op.clientID] = op.seqNum
 				} else {
 					// duplicate request
+					// DONT IGNORE, may be 2 requests in log
+					// should not execute, but should wake up those waiting for this index
 				}
+				// wake up sleeping
+				close(kv.commitIndexNotify[kv.currCommitIdx].indexUpdatedChan)
+				kv.mu.Unlock()
+				kv.commitIndexNotify[kv.currCommitIdx].handlerFinishedWg.Wait()
 			} else {
 				// command is not a Op struct
 			}
@@ -137,8 +200,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	op.key = args.Key
 	op.val = args.Value
-	wrongLeader, _ := kv.requestHandler(&op)
+	wrongLeader, _, err := kv.requestHandler(&op)
 	reply.WrongLeader = wrongLeader
+	reply.Err = err
+
 }
 
 //
@@ -183,8 +248,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.clientLookup = make(map[int64]int)
+	kv.clientLookup = make(map[int64]*LatestRPCByClient)
 	kv.kvStorage = make(map[string]string)
+	kv.commitIndexNotify = make(map[int]*CommitIndexCommunication)
+	kv.currCommitIdx = -1
 
 	go kv.listenApplyCh()
 	return kv
