@@ -172,7 +172,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		title = title + "one client"
 	}
 	title = title + " (" + part + ")" // 3A or 3B
-
+	DPrintf(title)
 	const nservers = 5
 	cfg := make_config(t, nservers, unreliable, maxraftstate)
 	defer cfg.cleanup()
@@ -193,6 +193,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
+			DPrintf("spawning one client")
 			j := 0
 			defer func() {
 				clnts[cli] <- j

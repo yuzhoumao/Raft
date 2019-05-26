@@ -2,6 +2,7 @@ package raftkv
 
 import (
 	"bytes"
+	"fmt"
 	"labgob"
 	"labrpc"
 	"log"
@@ -76,6 +77,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
+	DPrintf("inside requestHandler")
 	// kv.mu.Lock()
 	// _, isLeader := kv.rf.GetState()
 	// kv.mu.Unlock()
@@ -88,20 +90,27 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 	defer kv.mu.Unlock()
 	if _, ok := kv.clientLookup[op.ClientID]; !ok {
 		// a new client, keep track of its seq #
+		DPrintf("this is a new client")
 		lastestRPC := LatestRPCByClient{}
 		lastestRPC.seqNum = -1
 		kv.clientLookup[op.ClientID] = &lastestRPC
 	}
 	if kv.clientLookup[op.ClientID].seqNum < op.SeqNum {
 		// current request not in kv server's table
-		idxIfEverCommitted, _, isLeader := kv.rf.Start(op)
+		idxIfEverCommitted, _, isLeader := kv.rf.Start(*op)
+		DPrintf("idxIfEverCommitted %d", idxIfEverCommitted)
 		if !isLeader {
+			DPrintf("Raft believes it is not the leader")
 			return true, "", "" // Raft believes it is not the leader
 		}
+		fmt.Printf("kvserver %d starting op for %v %v\n", kv.me, op.ClientID, op.SeqNum)
 		// Start returns fairly quickly
 		// Start might actually return telling the server that it is not the leader
 		if _, ok := kv.commitIndexNotify[idxIfEverCommitted]; !ok {
+			DPrintf("new commit index %d", idxIfEverCommitted)
 			kv.commitIndexNotify[idxIfEverCommitted] = &CommitIndexCommunication{}
+			kv.commitIndexNotify[idxIfEverCommitted].indexUpdatedChan = make(chan bool)
+			kv.commitIndexNotify[idxIfEverCommitted].indexUpdatedChan <- true
 		}
 		kv.commitIndexNotify[idxIfEverCommitted].handlerFinishedWg.Add(1)
 		kv.mu.Unlock()
@@ -111,6 +120,7 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 		// read the value
 		if kv.currOp.ClientID != op.ClientID || kv.currOp.SeqNum != op.SeqNum {
 			// not my op at this commitIndex, error
+			fmt.Printf("not my op at this commitIndex, error")
 			return false, "", "Failed"
 		}
 		// it was my op
@@ -128,6 +138,7 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 		// // put or append
 		// return false, "" // done
 	}
+	fmt.Printf("kvServer # %d returning from handler\n", kv.me)
 	// kvServer has seen this request, and it has been executed (listen routine is responsible for updating clientLookup)
 	return false, kv.clientLookup[op.ClientID].value, kv.clientLookup[op.ClientID].err
 	// TODO: does a kvServer have to be leader to respond to duplicate requests?
@@ -135,16 +146,22 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 
 func (kv *KVServer) listenApplyCh() {
 	for applyMsg := range kv.applyCh {
+		fmt.Printf("kvServer # %d received a new message from applyCh\n", kv.me)
 		if applyMsg.CommandValid == false {
 			// ignore other types of ApplyMsg
+			fmt.Printf("kvServer # %d command not valid\n", kv.me)
 		} else {
 			// command valid
+			fmt.Printf("kvServer # %d command valid\n", kv.me)
 			op, ok := applyMsg.Command.(Op)
 			if ok {
+				fmt.Printf("ClientId %d\n", op.ClientID)
 				kv.mu.Lock()
 				kv.currCommitIdx++ // new commit
 				kv.currOp = op     // allow handlers to check if the op is the same as what they submitted
+				fmt.Printf("kvServer # %d op.SeqNum %d, kv.clientLookup[op.ClientID].seqNum %d\n", kv.me, op.SeqNum, kv.clientLookup[op.ClientID].seqNum)
 				if op.SeqNum > kv.clientLookup[op.ClientID].seqNum {
+					fmt.Printf("kvServer # %d not a duplicate request\n", kv.me)
 					// not a duplicate request
 					kv.clientLookup[op.ClientID].seqNum = op.SeqNum
 					if op.Opt == opGet {
@@ -180,11 +197,18 @@ func (kv *KVServer) listenApplyCh() {
 					// DONT simply IGNORE, may be 2 requests in log
 					// should not execute, but should wake up those waiting for this index
 				}
-				close(kv.commitIndexNotify[kv.currCommitIdx].indexUpdatedChan) // wake up handlers for this index
+				if _, ok := kv.commitIndexNotify[kv.currCommitIdx]; ok {
+					DPrintf("kvserver %d closing channel for commit index %d", kv.me, kv.currCommitIdx)
+					close(kv.commitIndexNotify[kv.currCommitIdx].indexUpdatedChan) // wake up handlers for this index
+				}
 				kv.mu.Unlock()
-				kv.commitIndexNotify[kv.currCommitIdx].handlerFinishedWg.Wait() // wait until all handlers have read the value
+				if _, ok := kv.commitIndexNotify[kv.currCommitIdx]; ok {
+					DPrintf("kvserver %d waiting for handlers to read value", kv.me)
+					kv.commitIndexNotify[kv.currCommitIdx].handlerFinishedWg.Wait() // wait until all handlers have read the value
+				}
 			} else {
 				// command is not a Op struct
+				fmt.Printf("command is not a Op struct\n")
 			}
 		}
 	}
@@ -199,6 +223,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	op.Key = args.Key
 	op.Val = args.Value
+	op.ClientID = args.ClientID
+	op.SeqNum = args.SeqNum
 	wrongLeader, _, err := kv.requestHandler(&op)
 	reply.WrongLeader = wrongLeader
 	reply.Err = err
@@ -248,7 +274,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.clientLookup = make(map[int64]*LatestRPCByClient)
 	kv.kvStorage = make(map[string]string)
 	kv.commitIndexNotify = make(map[int]*CommitIndexCommunication)
-	kv.currCommitIdx = -1
+	kv.currCommitIdx = 0
 
 	go kv.listenApplyCh()
 	return kv

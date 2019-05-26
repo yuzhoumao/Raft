@@ -4,12 +4,11 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
-	servers []*labrpc.ClientEnd
+	servers          []*labrpc.ClientEnd
 	currentLeaderIdx int
-	clientID int64
-	seqNum int
+	clientID         int64
+	seqNum           int
 	// You will have to modify this struct.
 }
 
@@ -41,19 +40,21 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	DPrintf("inside Clerk Get")
 	args := GetArgs{}
 	args.Key = key
-	
+
 	args.ClientID = ck.clientID
 	args.SeqNum = ck.seqNum
 	ck.seqNum++
-	
+
 	reply := GetReply{}
 
 	ok := false
 	for {
+		reply = GetReply{}
 		ok = ck.servers[ck.currentLeaderIdx].Call("KVServer.Get", &args, &reply)
-		if (ok && !reply.WrongLeader && (reply.Err == OK || reply.Err == ErrNoKey)) {
+		if ok && !reply.WrongLeader && (reply.Err == OK || reply.Err == ErrNoKey) {
 			break
 		}
 		ck.currentLeaderIdx = (ck.currentLeaderIdx + 1) % len(ck.servers)
@@ -80,17 +81,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-	
+
 	args.ClientID = ck.clientID
 	args.SeqNum = ck.seqNum
 	ck.seqNum++
-	
+
 	reply := PutAppendReply{}
-	
+
 	ok := false
 	for {
+		reply = PutAppendReply{}
+		DPrintf("making PutAppend RPC call for index %d", ck.currentLeaderIdx)
 		ok = ck.servers[ck.currentLeaderIdx].Call("KVServer.PutAppend", &args, &reply)
-		if (ok && !reply.WrongLeader && reply.Err == OK) {
+		if ok && !reply.WrongLeader && reply.Err == OK {
 			break
 		}
 		ck.currentLeaderIdx = (ck.currentLeaderIdx + 1) % len(ck.servers)
@@ -99,8 +102,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
+	DPrintf("inside Clerk Put")
 	ck.PutAppend(key, value, "Put")
 }
 func (ck *Clerk) Append(key string, value string) {
+	DPrintf("inside Clerk Append")
 	ck.PutAppend(key, value, "Append")
 }
