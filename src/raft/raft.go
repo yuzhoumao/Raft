@@ -111,6 +111,7 @@ type Raft struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
+	DPrintf("Raft # %d got the lock", rf.me)
 	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.currentState == leader
 }
@@ -155,6 +156,7 @@ func (rf *Raft) readPersist(data []byte) (int, error) {
 		return -1, errors.New("can't work with 42")
 	}
 	rf.mu.Lock()
+	DPrintf("Raft # %d got the lock", rf.me)
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
 	rf.log = log
@@ -207,6 +209,7 @@ type RequestVoteReplyWrapper struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
+	DPrintf("Raft # %d got the lock", rf.me)
 	defer rf.mu.Unlock()
 	defer rf.persist() // defer is LIFO
 	if args.Term < rf.currentTerm {
@@ -290,8 +293,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	DPrintf("Raft # %d in function Start()", rf.me)
+	fmt.Printf("Raft # %d in function Start()\n", rf.me)
 	rf.mu.Lock()
+	fmt.Printf("Raft # %d in function Start()\n", rf.me)
+	DPrintf("Raft # %d got the lock", rf.me)
 	defer rf.mu.Unlock()
 	if rf.currentState != leader {
 		return -1, -1, false
@@ -315,6 +320,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
+	DPrintf("Raft # %d got the lock", rf.me)
 	rf.currentState = killed
 	// fmt.Printf("Killed Raft # %d\n", rf.me)
 	rf.mu.Unlock()
@@ -370,24 +376,34 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 // Main
 func (rf *Raft) Main() {
-	DPrintf("Raft # %d in function Main()", rf.me)
 	go rf.electionTimeoutRoutine()
 	go rf.respondAppendEntriesRoutine()
 	DPrintf("Raft # %d entering applyMsg loop in Main()", rf.me)
 	for {
 		rf.mu.Lock()
+
 		if rf.currentState == killed {
+			//DPrintf("386 Raft # %d unlocked", rf.me)
 			rf.mu.Unlock()
 			return
 		}
 		if rf.commitIndex > rf.lastApplied {
-			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-				rf.applyCh <- ApplyMsg{true, rf.log[i].Command, i}
-				fmt.Printf("Raft # %d committing index %d with command %v\n", rf.me, i, rf.log[i].Command)
+			tmpStart := rf.lastApplied + 1
+			tmpEnd := rf.commitIndex
+			tmpSlice := rf.log[tmpStart : tmpEnd+1]
+			DPrintf("384 Raft # %d got the lock", rf.me)
+			rf.mu.Unlock()
+			for i := tmpStart; i <= tmpEnd; i++ {
+				rf.applyCh <- ApplyMsg{true, tmpSlice[i-tmpStart].Command, i}
+				DPrintf("Raft # %d committing index %d with command %+v\n", rf.me, i, tmpSlice[i-tmpStart].Command)
+				DPrintf("Raft # %d rf.commitIndex %d\n", rf.me, tmpEnd)
 			}
-			rf.lastApplied = rf.commitIndex
+			rf.mu.Lock()
+			rf.lastApplied = tmpEnd
+			DPrintf("Raft # %d rf.lastApplied %d\n", rf.me, rf.lastApplied)
 		}
 		rf.mu.Unlock()
+		//DPrintf("397 Raft # %d unlocked\n", rf.me)
 	}
 }
 
@@ -395,6 +411,7 @@ func (rf *Raft) respondAppendEntriesRoutine() {
 	DPrintf("Raft # %d in function respondAppendEntriesRoutine()", rf.me)
 	for {
 		rf.mu.Lock()
+		DPrintf("Raft # %d got the lock", rf.me)
 		if rf.currentState == killed {
 			return
 		}
@@ -406,8 +423,9 @@ func (rf *Raft) respondAppendEntriesRoutine() {
 }
 
 func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
-	DPrintf("Raft # %d in function respondAppendEntriesRoutineHelper()", rf.me)
+	// DPrintf("Raft # %d in function respondAppendEntriesRoutineHelper()", rf.me)
 	rf.mu.Lock()
+	DPrintf("Raft # %d got the lock", rf.me)
 	defer rf.mu.Unlock()
 	defer rf.persist()
 	DPrintf("Raft # %d processing one AE request", rf.me)
@@ -488,6 +506,7 @@ func (rf *Raft) electionTimeoutRoutine() {
 	DPrintf("Raft # %d in function electionTimeoutRoutine()", rf.me)
 	for {
 		rf.mu.Lock()
+		DPrintf("Raft # %d got the lock", rf.me)
 		DPrintf("Raft # %d electionTimerResetted: %t", rf.me, rf.electionTimerResetted)
 		DPrintf("Raft # %d believes it is LEADER: %t, electionTimeoutRoutine()", rf.me, rf.currentState == leader)
 		if rf.currentState == killed {
@@ -529,6 +548,7 @@ func (rf *Raft) kickOffElection() {
 	replyChan := make(chan *RequestVoteReply)
 	args := RequestVoteArgs{}
 	rf.mu.Lock()
+	DPrintf("Raft # %d got the lock", rf.me)
 	args.Term = rf.currentTerm
 	DPrintf("rf.currentTerm %d", rf.currentTerm)
 	args.CandidateId = rf.me
@@ -549,6 +569,7 @@ func (rf *Raft) kickOffElection() {
 	for { // request vote response handler
 		reply := <-replyChan
 		rf.mu.Lock()
+		DPrintf("Raft # %d got the lock", rf.me)
 		DPrintf("Raft # %d got RequestVote reply from Peer", rf.me)
 		if rf.currentTerm > args.Term {
 			// already timed out and kick started a new election
@@ -598,6 +619,7 @@ func (rf *Raft) leaderRoutine() {
 	go rf.appendEntriesSenderHandleResponse(replyChan)
 	for {
 		rf.mu.Lock()
+		DPrintf("Raft # %d got the lock", rf.me)
 		if rf.currentState != leader {
 			rf.mu.Unlock()
 			return
@@ -630,6 +652,7 @@ func (rf *Raft) sendRealAppendEntries(peerIndex int, replyChan chan *AppendEntri
 	DPrintf("Raft # %d is now %+v", rf.me, rf)
 	args, replyBefore := AppendEntriesArgs{}, AppendEntriesReply{}
 	rf.mu.Lock()
+	DPrintf("Raft # %d got the lock", rf.me)
 	args.Term = rf.currentTerm
 	DPrintf("LEADER Raft # %d in term %d", rf.me, args.Term)
 	args.LeaderId = rf.me
@@ -647,6 +670,7 @@ func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
 	DPrintf("Raft # %d in function sendHeartbeatRoutine()", rf.me)
 	for {
 		rf.mu.Lock()
+		DPrintf("Raft # %d got the lock", rf.me)
 		DPrintf("Raft # %d believes it is LEADER: %t, sendHeartbeatRoutine()", rf.me, rf.currentState == leader)
 		if rf.currentState != leader {
 			rf.mu.Unlock()
@@ -676,6 +700,7 @@ func (rf *Raft) sendHeartbeatRoutine(replyChan chan *AppendEntriesRPC) {
 func (rf *Raft) sendAppendEntriesBoth(peerIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply, replyChan chan *AppendEntriesRPC) {
 	DPrintf("Raft # %d in function sendAppendEntriesBoth()", rf.me)
 	rf.mu.Lock()
+	DPrintf("695 Raft # %d got the lock", rf.me)
 	ce := rf.peers[peerIndex]
 	cs := rf.currentState
 	rf.mu.Unlock()
@@ -710,6 +735,7 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 	for {
 		rpc := <-replyChan
 		rf.mu.Lock()
+		DPrintf("Raft # %d got the lock", rf.me)
 		if rf.currentState != leader {
 			rf.mu.Unlock()
 			return
@@ -754,6 +780,7 @@ func (rf *Raft) appendEntriesSenderHandleResponse(replyChan chan *AppendEntriesR
 func (rf *Raft) updateLeaderCommitIndex() {
 	DPrintf("Raft # %d in function updateLeaderCommitIndex()", rf.me)
 	rf.mu.Lock()
+	DPrintf("Raft # %d got the lock", rf.me)
 	matchIndex := append(make([]int, 0), rf.matchIndex...)
 	matchIndex[rf.me] = len(rf.log) - 1
 	DPrintf("Raft # %d matchIndex before sort : %v", rf.me, matchIndex)
@@ -763,8 +790,10 @@ func (rf *Raft) updateLeaderCommitIndex() {
 	medianCommitIndex := matchIndex[rf.majorityNeed-1]
 	DPrintf("Raft # %d median index : %d", rf.me, medianCommitIndex)
 	rf.mu.Lock()
+	DPrintf("785 Raft # %d got the lock", rf.me)
 	if medianCommitIndex > rf.commitIndex && rf.log[medianCommitIndex].TermReceived == rf.currentTerm {
 		rf.commitIndex = medianCommitIndex
 	}
+	DPrintf("789 Raft # %d unlocked", rf.me)
 	rf.mu.Unlock()
 }

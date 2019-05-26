@@ -87,6 +87,8 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 	// the above has been commented out because Start() will always check if
 	// the Raft server being contacted is the leader or not
 	kv.mu.Lock()
+	fmt.Printf("90 kvServer # %d got the lock\n", kv.me)
+	defer fmt.Printf("kvServer # %d released the lock\n", kv.me)
 	defer kv.mu.Unlock()
 	if _, ok := kv.clientLookup[op.ClientID]; !ok {
 		// a new client, keep track of its seq #
@@ -98,6 +100,7 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 	if kv.clientLookup[op.ClientID].seqNum < op.SeqNum {
 		// current request not in kv server's table
 		idxIfEverCommitted, _, isLeader := kv.rf.Start(*op)
+		fmt.Printf("kvServer # %d returned from Start\n", kv.me)
 		DPrintf("idxIfEverCommitted %d", idxIfEverCommitted)
 		if !isLeader {
 			DPrintf("Raft believes it is not the leader")
@@ -112,10 +115,12 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 			kv.commitIndexNotify[idxIfEverCommitted].indexUpdatedChan = make(chan bool)
 		}
 		kv.commitIndexNotify[idxIfEverCommitted].handlerFinishedWg.Add(1)
+		fmt.Printf("kvServer # %d released the lock\n", kv.me)
 		kv.mu.Unlock()
 		// unlock here b/c agreement can take a while
 		<-kv.commitIndexNotify[idxIfEverCommitted].indexUpdatedChan // listen routine will close this channel when value arrives
 		kv.mu.Lock()                                                // ready to read values from kv storage
+		fmt.Printf("122 kvServer # %d got the lock\n", kv.me)
 		// read the value
 		if kv.currOp.ClientID != op.ClientID || kv.currOp.SeqNum != op.SeqNum {
 			// not my op at this commitIndex, error
@@ -144,7 +149,8 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 }
 
 func (kv *KVServer) listenApplyCh() {
-	for applyMsg := range kv.applyCh {
+	for {
+		applyMsg := <-kv.applyCh
 		fmt.Printf("kvServer # %d received a new message from applyCh\n", kv.me)
 		if applyMsg.CommandValid == false {
 			// ignore other types of ApplyMsg
@@ -156,6 +162,7 @@ func (kv *KVServer) listenApplyCh() {
 			if ok {
 				fmt.Printf("ClientId %d\n", op.ClientID)
 				kv.mu.Lock()
+				fmt.Printf("163 kvServer # %d got the lock\n", kv.me)
 				kv.currCommitIdx++ // new commit
 				kv.currOp = op     // allow handlers to check if the op is the same as what they submitted
 				if _, ok := kv.clientLookup[op.ClientID]; !ok {
@@ -204,13 +211,16 @@ func (kv *KVServer) listenApplyCh() {
 					// should not execute, but should wake up those waiting for this index
 				}
 				if _, ok := kv.commitIndexNotify[kv.currCommitIdx]; ok {
+					commitComm := kv.commitIndexNotify[kv.currCommitIdx]
 					DPrintf("kvserver %d closing channel for commit index %d", kv.me, kv.currCommitIdx)
-					close(kv.commitIndexNotify[kv.currCommitIdx].indexUpdatedChan) // wake up handlers for this index
-				}
-				kv.mu.Unlock()
-				if _, ok := kv.commitIndexNotify[kv.currCommitIdx]; ok {
+					close(commitComm.indexUpdatedChan) // wake up handlers for this index
+					fmt.Printf("kvServer # %d released the lock\n", kv.me)
+					kv.mu.Unlock()
 					DPrintf("kvserver %d waiting for handlers to read value", kv.me)
-					kv.commitIndexNotify[kv.currCommitIdx].handlerFinishedWg.Wait() // wait until all handlers have read the value
+					commitComm.handlerFinishedWg.Wait() // wait until all handlers have read the value
+				} else {
+					fmt.Printf("kvServer # %d released the lock\n", kv.me)
+					kv.mu.Unlock()
 				}
 			} else {
 				// command is not a Op struct
