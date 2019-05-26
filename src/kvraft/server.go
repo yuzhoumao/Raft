@@ -110,7 +110,6 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 			DPrintf("new commit index %d", idxIfEverCommitted)
 			kv.commitIndexNotify[idxIfEverCommitted] = &CommitIndexCommunication{}
 			kv.commitIndexNotify[idxIfEverCommitted].indexUpdatedChan = make(chan bool)
-			kv.commitIndexNotify[idxIfEverCommitted].indexUpdatedChan <- true
 		}
 		kv.commitIndexNotify[idxIfEverCommitted].handlerFinishedWg.Add(1)
 		kv.mu.Unlock()
@@ -159,6 +158,13 @@ func (kv *KVServer) listenApplyCh() {
 				kv.mu.Lock()
 				kv.currCommitIdx++ // new commit
 				kv.currOp = op     // allow handlers to check if the op is the same as what they submitted
+				if _, ok := kv.clientLookup[op.ClientID]; !ok {
+					// a new client, keep track of its seq #
+					DPrintf("this is a new client")
+					lastestRPC := LatestRPCByClient{}
+					lastestRPC.seqNum = -1
+					kv.clientLookup[op.ClientID] = &lastestRPC
+				}
 				fmt.Printf("kvServer # %d op.SeqNum %d, kv.clientLookup[op.ClientID].seqNum %d\n", kv.me, op.SeqNum, kv.clientLookup[op.ClientID].seqNum)
 				if op.SeqNum > kv.clientLookup[op.ClientID].seqNum {
 					fmt.Printf("kvServer # %d not a duplicate request\n", kv.me)
