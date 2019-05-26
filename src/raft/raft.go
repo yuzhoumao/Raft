@@ -463,7 +463,6 @@ func (rf *Raft) respondAppendEntriesRoutineHelper(rpc *AppendEntriesRPC) {
 		rpc.reply.StartOfConflictTerm = binarySearchFindFirst(rf.log, conflictIndex, conflictTerm)
 		return
 	}
-	DPrintf("Raft # %d is now %+v", rf.me, rf)
 	DPrintf("AE request is now %+v", rpc.args)
 	// now that the PrevLog entry agrees, delete all entries in rf.log
 	// that does not agree with those in rpc.args.entries
@@ -649,7 +648,6 @@ func (rf *Raft) sendRealAppendEntries(peerIndex int, replyChan chan *AppendEntri
 	DPrintf("Raft # %d in function sendRealAppendEntries()", rf.me)
 	// only start if in leader state, should stop if converts to follower
 	// should be accompanied by a timer for every server
-	DPrintf("Raft # %d is now %+v", rf.me, rf)
 	args, replyBefore := AppendEntriesArgs{}, AppendEntriesReply{}
 	rf.mu.Lock()
 	DPrintf("Raft # %d got the lock", rf.me)
