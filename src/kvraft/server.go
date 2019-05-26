@@ -30,16 +30,15 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	opt      OpTypes
-	key      string
-	val      string
-	clientID int64
-	seqNum   int
+	Opt      OpTypes
+	Key      string
+	Val      string
+	ClientID int64
+	SeqNum   int
 }
 
 type KVServer struct {
 	mu            sync.Mutex
-	cond          *sync.Cond
 	me            int
 	rf            *raft.Raft
 	applyCh       chan raft.ApplyMsg
@@ -47,9 +46,9 @@ type KVServer struct {
 	currOp        Op
 	maxraftstate  int // snapshot if log grows this big
 
-	clientLookup      map[int64]*LatestRPCByClient
-	kvStorage         map[string]string
-	commitIndexNotify map[int]*CommitIndexCommunication
+	clientLookup      map[int64]*LatestRPCByClient      // per client duplicate handling
+	kvStorage         map[string]string                 // shared kv state across client
+	commitIndexNotify map[int]*CommitIndexCommunication // poke routines as necessary
 }
 
 type CommitIndexCommunication struct {
@@ -65,10 +64,10 @@ type LatestRPCByClient struct {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	op := Op{}
-	op.opt = opGet
-	op.key = args.Key
-	op.clientID = args.ClientID
-	op.seqNum = args.SeqNum
+	op.Opt = opGet
+	op.Key = args.Key
+	op.ClientID = args.ClientID
+	op.SeqNum = args.SeqNum
 	wrongLeader, value, err := kv.requestHandler(&op)
 	reply.WrongLeader = wrongLeader
 	reply.Value = value
@@ -87,13 +86,13 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 	// the Raft server being contacted is the leader or not
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if _, ok := kv.clientLookup[op.clientID]; !ok {
+	if _, ok := kv.clientLookup[op.ClientID]; !ok {
 		// a new client, keep track of its seq #
 		lastestRPC := LatestRPCByClient{}
 		lastestRPC.seqNum = -1
-		kv.clientLookup[op.clientID] = &lastestRPC
+		kv.clientLookup[op.ClientID] = &lastestRPC
 	}
-	if kv.clientLookup[op.clientID].seqNum < op.seqNum {
+	if kv.clientLookup[op.ClientID].seqNum < op.SeqNum {
 		// current request not in kv server's table
 		idxIfEverCommitted, _, isLeader := kv.rf.Start(op)
 		if !isLeader {
@@ -110,7 +109,7 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 		<-kv.commitIndexNotify[idxIfEverCommitted].indexUpdatedChan // listen routine will close this channel when value arrives
 		kv.mu.Lock()                                                // ready to read values from kv storage
 		// read the value
-		if kv.currOp.clientID != op.clientID || kv.currOp.seqNum != op.seqNum {
+		if kv.currOp.ClientID != op.ClientID || kv.currOp.SeqNum != op.SeqNum {
 			// not my op at this commitIndex, error
 			return false, "", "Failed"
 		}
@@ -130,7 +129,7 @@ func (kv *KVServer) requestHandler(op *Op) (bool, string, Err) {
 		// return false, "" // done
 	}
 	// kvServer has seen this request, and it has been executed (listen routine is responsible for updating clientLookup)
-	return false, kv.clientLookup[op.clientID].value, kv.clientLookup[op.clientID].err
+	return false, kv.clientLookup[op.ClientID].value, kv.clientLookup[op.ClientID].err
 	// TODO: does a kvServer have to be leader to respond to duplicate requests?
 }
 
@@ -143,47 +142,47 @@ func (kv *KVServer) listenApplyCh() {
 			op, ok := applyMsg.Command.(Op)
 			if ok {
 				kv.mu.Lock()
-				kv.currCommitIdx++
-				kv.currOp = op // allow handlers to check if the op is the same as what they submitted
-				if op.seqNum > kv.clientLookup[op.clientID].seqNum {
+				kv.currCommitIdx++ // new commit
+				kv.currOp = op     // allow handlers to check if the op is the same as what they submitted
+				if op.SeqNum > kv.clientLookup[op.ClientID].seqNum {
 					// not a duplicate request
-					kv.clientLookup[op.clientID].seqNum = op.seqNum
-					if op.opt == opGet {
-						val, ok := kv.kvStorage[op.key]
+					kv.clientLookup[op.ClientID].seqNum = op.SeqNum
+					if op.Opt == opGet {
+						val, ok := kv.kvStorage[op.Key]
 						if ok {
-							kv.clientLookup[op.clientID].value = val
-							kv.clientLookup[op.clientID].err = OK
+							kv.clientLookup[op.ClientID].value = val
+							kv.clientLookup[op.ClientID].err = OK
 						} else {
-							kv.clientLookup[op.clientID].value = ""
-							kv.clientLookup[op.clientID].err = ErrNoKey
+							kv.clientLookup[op.ClientID].value = ""
+							kv.clientLookup[op.ClientID].err = ErrNoKey
 						}
-					} else if op.opt == opPut {
-						kv.kvStorage[op.key] = op.val
-						kv.clientLookup[op.clientID].value = ""
-						kv.clientLookup[op.clientID].err = OK
-					} else if op.opt == opAppend {
-						oldVal, kvReadok := kv.kvStorage[op.key]
+					} else if op.Opt == opPut {
+						kv.kvStorage[op.Key] = op.Val
+						kv.clientLookup[op.ClientID].value = ""
+						kv.clientLookup[op.ClientID].err = OK
+					} else if op.Opt == opAppend {
+						oldVal, kvReadok := kv.kvStorage[op.Key]
 						if kvReadok {
 							var buffer bytes.Buffer
 							buffer.WriteString(oldVal)
-							buffer.WriteString(op.val)
-							kv.kvStorage[op.key] = buffer.String()
+							buffer.WriteString(op.Val)
+							kv.kvStorage[op.Key] = buffer.String()
 						} else {
-							kv.kvStorage[op.key] = op.val
+							// no such key, append functions like put
+							kv.kvStorage[op.Key] = op.Val
 						}
-						kv.clientLookup[op.clientID].value = ""
-						kv.clientLookup[op.clientID].err = OK
+						kv.clientLookup[op.ClientID].value = ""
+						kv.clientLookup[op.ClientID].err = OK
 					}
 					// correctly processed, now wake up sleeping
 				} else {
 					// duplicate request
-					// DONT IGNORE, may be 2 requests in log
+					// DONT simply IGNORE, may be 2 requests in log
 					// should not execute, but should wake up those waiting for this index
 				}
-				// wake up sleeping
-				close(kv.commitIndexNotify[kv.currCommitIdx].indexUpdatedChan)
+				close(kv.commitIndexNotify[kv.currCommitIdx].indexUpdatedChan) // wake up handlers for this index
 				kv.mu.Unlock()
-				kv.commitIndexNotify[kv.currCommitIdx].handlerFinishedWg.Wait()
+				kv.commitIndexNotify[kv.currCommitIdx].handlerFinishedWg.Wait() // wait until all handlers have read the value
 			} else {
 				// command is not a Op struct
 			}
@@ -194,16 +193,15 @@ func (kv *KVServer) listenApplyCh() {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	op := Op{}
 	if args.Op == "Put" {
-		op.opt = opPut
+		op.Opt = opPut
 	} else if args.Op == "Append" {
-		op.opt = opAppend
+		op.Opt = opAppend
 	}
-	op.key = args.Key
-	op.val = args.Value
+	op.Key = args.Key
+	op.Val = args.Value
 	wrongLeader, _, err := kv.requestHandler(&op)
 	reply.WrongLeader = wrongLeader
 	reply.Err = err
-
 }
 
 //
@@ -241,7 +239,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	kv.mu = sync.Mutex{}
-	kv.cond = sync.NewCond(&kv.mu)
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
